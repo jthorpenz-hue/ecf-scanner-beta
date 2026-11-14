@@ -46,7 +46,8 @@ label.f{display:block;font-size:.8rem;color:var(--steel);margin:6px 0 2px}
 #cam.off{cursor:pointer}
 #torch{position:absolute;top:8px;right:8px;z-index:2;min-height:34px;padding:4px 12px;background:rgba(16,23,25,.7);font-size:.85rem}
 #cam{padding-top:56%}#cam canvas{touch-action:manipulation}
-#cur{background:#fff;border:2px solid var(--line);border-radius:10px;padding:10px;min-height:70px}
+#cur{color:var(--steel);font-style:italic;font-size:.9rem;padding:6px 2px;min-height:34px}
+#cur.ok,#cur.hold,#cur.bad{font-style:normal;font-size:1rem;color:var(--ink,#1c2b2f);background:#fff;border:2px solid var(--line);border-radius:10px;padding:10px;min-height:70px}
 #cur.ok{border-color:var(--go)}#cur.hold{border-color:var(--hold);background:#fff8e8}#cur.bad{border-color:var(--bad);background:#fdeceb}
 #cur .big{font-size:1.1rem;font-weight:700}#cur .mut{color:var(--steel);font-size:.85rem}
 .tag{display:inline-block;font-size:.75rem;font-weight:700;padding:1px 8px;border-radius:999px;background:var(--soft);margin:2px 4px 2px 0}
@@ -134,7 +135,7 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
 
 <script>
 /* ============================== constants ============================== */
-const BUILD='vB0.2.0';
+const BUILD='vB0.2.1';
 const DEFAULT_URL='https://script.google.com/macros/s/AKfycbyx2IrRDLzrY4J_yH5TUdAi8QVsR4hpaZvZeYHevBeIUjIxjGNHkjU9S1_ooV4S2Yvn/exec';   // paste the Apps Script web app address (ending /exec) between the quotes and the phones need no setup for it   // keep in step with V in sw.js
 const ROLES=[
  {name:'Meat Packing',sub:'IN: put new packs into stock'},
@@ -150,7 +151,7 @@ const RETURN_FROM=['Market NFM','Market MOT','Market TAK','Shop','Special order'
 const WRITEOFF_WHY=['Damaged','Out of date','Mislabelled','Dropped','Quality','Other'];
 const ST_LOCS=['Chiller','Freezer','Shop','Market'];
 const REMOVES={Sell:1,Out:1,Writeoff:1,Offline:1,Missing:1};   // actions that can take a pack out of the online pool
-const GO='#1fb85a',HOLD='#f2c200',IDLE=60000,REARM=1500;
+const GO='#1fb85a',HOLD='#f2c200',RED='#e03131',IDLE=60000,REARM=1500;
 
 /* ============================== state ============================== */
 const $=id=>document.getElementById(id);
@@ -449,6 +450,10 @@ async function undo(i){
   if(!await confirmD('Undo this scan?','<p>'+esc(r.label)+'</p><p>A cancelling entry is added. The original stays in the log.</p>','Undo'))return;
   const evs=r.ids.map(id=>mkEvent('Void','',{linked:id,note:'Undo: '+r.label}));
   r.voided=true;sessUnmark(r.ids);evs.forEach(e=>queue.push(e));
+  if(r.pick){   // take the pick (or substitution) back off the order line
+    const l=((ref&&ref.pickList)||[]).find(x=>String(x.order)===String(r.pick.order)&&(r.pick.line?x.line===r.pick.line:x.key===r.pick.key));
+    if(l){l.picked=Math.max(0,(+l.picked||0)-r.pick.n);if(r.pick.sub){const p=String(l.subs||'').split(' | '),at=p.lastIndexOf(r.pick.sub);if(at>=0)p.splice(at,1);l.subs=p.join(' | ')}SV('ref',ref);if(mode==='Pick')renderPick()}
+  }
   recent.push({ids:evs.map(e=>e.id),label:'Undo: '+r.label,time:nowIso(),status:'queued',warn:'',voided:false,noUndo:true});
   saveQ();renderRecent();flush();
 }
@@ -719,14 +724,14 @@ function ordersList(){
     const o=by[k];o.q=o.lines.reduce((n,l)=>n+(+l.qty||0),0);o.p=o.lines.reduce((n,l)=>n+Math.min(+l.qty||0,+l.picked||0),0);o.done=o.q>0&&o.p>=o.q;return o;
   }).sort((a,b)=>String(a.created||'~').localeCompare(String(b.created||'~'))||a.id.localeCompare(b.id,undefined,{numeric:true}));
 }
-const orderTitle=o=>(o.customer?esc(o.customer)+' · ':'')+'<span style="white-space:nowrap">Order '+esc(o.id)+'</span>';
+const orderTitle=o=>(o.customer?esc(o.customer)+' · ':'')+'<span style="white-space:nowrap">'+esc(o.id)+'</span>';
 /* An order barcode on a packing slip is the order id, optionally written ORD:<id> or ORDER:<id>. */
 function orderFromScan(raw){
   const t=String(raw==null?'':raw).trim().replace(/^\](d2|Q3|C1)/,'').replace(/^[\x1d~|]+/,'');
   const id=t.replace(/^(?:ECF-)?ORD(?:ER)?[:#\s-]+/i,'').toLowerCase(),ids=ordersList().map(o=>o.id);
   return ids.find(i=>i.toLowerCase()===id)||ids.find(i=>i.toLowerCase()===t.toLowerCase())||null;
 }
-function openOrder(id){pickOrd=id;renderPick();resetCur('Picking order '+id+'. Scan each pack you take.');const e=$('picklist');if(e)e.scrollIntoView({block:'nearest'})}
+function openOrder(id){pickOrd=id;renderPick();resetCur('Picking '+id+'. Scan each pack you take, or touch an item to mark it picked by hand.');const e=$('picklist');if(e)e.scrollIntoView({block:'nearest'})}
 /* The unpicked line of the open order that this pack fills (it must match the product and weight band exactly). */
 function pickMatch(pr,o){
   o=o||ordersList().find(x=>x.id===pickOrd);if(!o||pr.err||(pr.kind!=='ean13'&&pr.kind!=='gs1'))return null;
@@ -753,11 +758,27 @@ function renderPick(){
     '<div class="mut" style="font-size:.85rem;margin:2px 0 6px;color:'+(o.done?'#168a43':'#b03030')+'">'+(o.done?'All items picked. Set the order to Complete in WooCommerce (not done by this app).':'Still to pick: '+(o.q-o.p)+' item'+(o.q-o.p>1?'s':''))+'</div>'+
     groups.map(x=>'<div class="sec" style="margin:10px 0 2px">'+x.g+'</div>'+x.ls.map(l=>{
       const q=+l.qty||0,p=Math.min(q,+l.picked||0),full=p>=q,subs=String(l.subs||'').split(' | ').filter(Boolean);
-      return'<div class="card" style="margin:4px 0;background:'+(full?'#eef9f1':'#fff')+'"><div class="line"><b>'+esc(l.product||nameOfKey(l.key))+'</b><span>'+(q>1?p+' / '+q:(full?'Picked ✓':'To pick'))+'</span></div>'+
+      return'<div class="card pl" data-l="'+o.lines.indexOf(l)+'" style="margin:4px 0;cursor:pointer;background:'+(full?'#eef9f1':'#fff')+'"><div class="line"><b>'+esc(l.product||nameOfKey(l.key))+'</b><span>'+(q>1?p+' / '+q:(full?'Picked ✓':'To pick'))+'</span></div>'+
         '<div class="mut" style="font-size:.8rem;color:var(--steel)">Acceptable weight: '+esc(weightRange(l))+'</div>'+
         (q>1?'<div class="prog"><i style="width:'+(q?p/q*100:0)+'%"></i></div>':'')+
         subs.map(sb=>'<div style="color:#c0392b;font-size:.82rem;margin-top:3px">Substituted: '+esc(sb)+'</div>').join('')+'</div>'}).join('')).join('')+'</div>';
+  d.querySelectorAll('.pl').forEach(e=>{e.onclick=()=>manualPick(o,o.lines[+e.dataset.l])});
   $('po_back').onclick=()=>{pickOrd=null;renderPick();resetCur('Touch an order to start picking, or scan the barcode on its packing slip.')};
+}
+function stepMp(d){const e=$('mp_n');e.value=Math.min(+e.max,Math.max(1,(Math.floor(+e.value)||1)+d))}
+/* Mark items picked by hand: no barcode, pack not here to scan, or label missing or damaged. Logged as a web order sale of that stock key. */
+async function manualPick(o,line){
+  const q=+line.qty||0,rem=q-(+line.picked||0),name=line.product||nameOfKey(line.key);
+  if(rem<=0)return;
+  const n=await dlg('Mark as picked','<p><b>'+esc(name)+'</b><br>'+(+line.picked||0)+' of '+q+' picked so far.</p><div class="row" style="align-items:center"><button type="button" class="ghost" onclick="stepMp(-1)">−</button>'+
+    '<input type="number" id="mp_n" inputmode="numeric" min="1" max="'+rem+'" value="'+rem+'" style="text-align:center"><button type="button" class="ghost" onclick="stepMp(1)">+</button></div>'+
+    '<p style="color:var(--steel);font-size:.85rem">How many to mark as picked (up to '+rem+')? Use this for items with no barcode, or when the pack is not here to scan or its label is missing or damaged. Stock is taken off this product.</p>',
+    [{t:'Cancel',v:false,c:'ghost'},{t:'Mark picked',v:()=>{const x=Math.floor(+$('mp_n').value);return x>=1&&x<=rem?x:undefined},c:'go'}]);
+  if(!n)return;
+  const t=lineInfo(line).t,ev=mkEvent('Sell','',{type2:'Web order',reference:o.id,stockKey:line.key,qty:n,temperature:t==='F'?'Frozen':'Chilled',note:'MANUAL: marked picked by hand'});
+  line.picked=(+line.picked||0)+n;SV('ref',ref);
+  enqueue([ev],o.id+' · '+name+' × '+n+' marked picked by hand',{pick:{order:o.id,line:line.line,key:line.key,n,sub:''}});okTone();
+  showCard('ok','<div class="big">Marked picked</div><div class="mut">'+esc(name)+' × '+n+' · '+esc(o.id)+'</div>');renderPick();
 }
 async function doPick(pr){
   if(pr.kind==='box')return scanBad(pr.code,'Box lines are not on the pick list yet.');
@@ -767,7 +788,7 @@ async function doPick(pr){
   if(!m){
     warnTone();const a=analyse(pr,'C','');
     const open=o.lines.filter(l=>(+l.qty||0)>(+l.picked||0));
-    showCard('hold',packHtml(pr,a,'<div class="mut">Not an item still to pick on order '+esc(o.id)+'.</div>',[['Not on this order','amber']]));
+    showCard('hold',packHtml(pr,a,'<div class="mut">Not an item still to pick on '+esc(o.id)+'.</div>',[['Not on this order','amber']]));
     if(!open.length)return;
     const line=await dlg('Substitute this pack?','<p><b>'+esc(labelOf(pr,a))+'</b> is not an item still to pick on this order. Which item is it replacing?</p>',
       open.map(l=>({t:(l.product||nameOfKey(l.key))+' ('+(+l.picked||0)+' / '+l.qty+')',v:l,c:'ghost'})).concat([{t:'Cancel, do not use it',v:null,c:'ghost'}]));
@@ -776,16 +797,16 @@ async function doPick(pr){
     const vs=/-([A-Z][A-Z0-9]*)-\d+-[CF]$/.exec(a.key||''),what=labelOf(pr,a);
     const ev=mkEvent('Sell',pr.code,{type2:'Web order',reference:o.id,temperature:tempFor(pr,mode),variant:vs?vs[1]:'',note:'SUB['+(line.line||'')+'] '+what});
     line.picked=(+line.picked||0)+1;line.subs=(line.subs?line.subs+' | ':'')+what;SV('ref',ref);
-    enqueue([ev],'Order '+o.id+' · substituted '+what);okTone();
-    showCard('ok',packHtml(pr,a,'<div style="color:#c0392b">Substituted for '+esc(line.product||nameOfKey(line.key))+'</div><div class="mut">Order '+esc(o.id)+'</div>',[['Order '+o.id,'green']]));renderPick();return;
+    enqueue([ev],o.id+' · substituted '+what,{pick:{order:o.id,line:line.line,key:line.key,n:1,sub:what}});okTone();
+    showCard('ok',packHtml(pr,a,'<div style="color:#c0392b">Substituted for '+esc(line.product||nameOfKey(line.key))+'</div><div class="mut">'+esc(o.id)+'</div>',[[o.id,'green']]));renderPick();return;
   }
   const {line:hit,a,t}=m,vm=/-([A-Z][A-Z0-9]*)-\d+-[CF]$/.exec(hit.key);
   if(!await shortGate([{name:labelOf(pr,a),info:stockInfo(a,t)}]))return;
   const ev=mkEvent('Sell',pr.code,{type2:'Web order',reference:hit.order,temperature:t==='F'?'Frozen':'Chilled',variant:vm?vm[1]:''});
   hit.picked=(+hit.picked||0)+1;SV('ref',ref);
-  enqueue([ev],'Order '+hit.order+' · '+labelOf(pr,a));okTone();
+  enqueue([ev],hit.order+' · '+labelOf(pr,a),{pick:{order:hit.order,line:hit.line,key:hit.key,n:1,sub:''}});okTone();
   const left=ordersList().find(x=>x.id===o.id);
-  showCard('ok',packHtml(pr,a,'<div class="mut">Order '+esc(hit.order)+' · '+hit.picked+' of '+hit.qty+' picked'+(left&&left.done?'</div><div class="big" style="color:#168a43">Order complete</div><div class="mut">':'')+'</div>',[['Order '+hit.order,'green']]));renderPick();
+  showCard('ok',packHtml(pr,a,'<div class="mut">'+esc(hit.order)+' · '+hit.picked+' of '+hit.qty+' picked'+(left&&left.done?'</div><div class="big" style="color:#168a43">Order complete</div><div class="mut">':'')+'</div>',[[hit.order,'green']]));renderPick();
 }
 /* Stocktake */
 const resetCur=t=>{$('cur').className='';$('cur').textContent=t||'Pick a mode, then scan a pack label.'};
@@ -891,9 +912,11 @@ function handle(list,now){
   const auto=$('auto').value==='1',strict=$('dup').value==='strict',inView={};let todo=null;
   for(const it of list){
     inView[it.raw]=1;const pr=parseScan(it.raw),c=caps[it.raw];if(c)c.seen=now;
-    let blocked=!!c||(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial));
-    if(!blocked&&mode==='Pick'&&!pickOk(it.raw,pr))blocked=true;   // yellow: not an item still to pick (a tap can still substitute it)
-    it.color=blocked?HOLD:GO;stab[it.raw]=(stab[it.raw]||0)+1;
+    /* red = already scanned (not allowed); yellow = picking an order and this is not an item still to pick (a tap can still substitute it);
+       green = can be captured. Picking in tap mode lets the same code be scanned again and again (identical packs). */
+    const red=(!(mode==='Pick'&&!auto)&&!!c)||(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial));
+    const amber=!red&&mode==='Pick'&&!pickOk(it.raw,pr),blocked=red||amber;
+    it.color=red?RED:amber?HOLD:GO;stab[it.raw]=(stab[it.raw]||0)+1;
     if(!blocked&&!todo&&stab[it.raw]>=2)todo=it;
   }
   Object.keys(stab).forEach(k=>{if(!inView[k])delete stab[k]});
