@@ -41,7 +41,8 @@ label.f{display:block;font-size:.8rem;color:var(--steel);margin:6px 0 2px}
 #cam{position:relative;background:#101719;border-radius:10px;overflow:hidden;height:0;padding-top:70%}
 #cam video,#cam canvas{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover}
 #msg{position:absolute;left:0;right:0;bottom:0;padding:6px 12px;background:rgba(16,23,25,.72);color:#fff;font-size:.85rem}
-#cap{width:100%;font-weight:600}#cap.ready{background:var(--go)}
+#camwrap{position:sticky;top:0;z-index:5;background:var(--chalk);padding:2px 0 6px}
+#cam{padding-top:56%}#cam canvas{touch-action:manipulation}
 #cur{background:#fff;border:2px solid var(--line);border-radius:10px;padding:10px;min-height:70px}
 #cur.ok{border-color:var(--go)}#cur.hold{border-color:var(--hold);background:#fff8e8}#cur.bad{border-color:var(--bad);background:#fdeceb}
 #cur .big{font-size:1.1rem;font-weight:700}#cur .mut{color:var(--steel);font-size:.85rem}
@@ -87,26 +88,27 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
 
 <section id="work" hidden>
   <div class="modes" id="modes"></div>
-  <div id="opts" class="card"></div>
 
-  <div id="cur">Pick a mode, then scan a pack label.</div>
-
-  <div class="row"><select id="src" aria-label="Input source"><option value="cam">Input: phone camera</option><option value="bt">Input: handheld Bluetooth scanner</option></select></div>
-  <div id="cam" class="camonly"><video id="v" playsinline muted></video><canvas id="o"></canvas><div id="msg">Camera is off</div></div>
-  <div class="row camonly"><button id="power" style="flex:1">Enable camera</button><button id="torch" hidden>Torch</button></div>
-  <div id="btui" hidden><label for="scan" style="font-size:.85rem;color:var(--steel)">Handheld scanner: pull the trigger to scan</label><input type="text" id="scan" inputmode="none" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Waiting for scanner…"><div id="dbg" style="font-size:.75rem;color:var(--steel)">Scanner readout: waiting for a key</div></div>
-  <div class="row camonly">
-    <select id="auto" class="half" aria-label="Scan mode"><option value="1">Auto scan</option><option value="0" selected>Manual scan</option></select>
-    <select id="dup" class="half" aria-label="Repeat rule"><option value="rearm">Repeat after code leaves frame</option><option value="strict" selected>No repeat until new code</option></select>
+  <div id="camwrap" class="camonly">
+    <div id="cam"><video id="v" playsinline muted></video><canvas id="o"></canvas><div id="msg">Camera is off</div></div>
+    <div class="row" style="margin:6px 0 0"><button id="power" style="flex:1">Enable camera</button><button id="torch" hidden>Torch</button></div>
   </div>
-  <button id="cap" class="camonly" disabled>Capture</button>
-
+  <div id="btui" hidden><label for="scan" style="font-size:.85rem;color:var(--steel)">Handheld scanner: pull the trigger to scan</label><input type="text" id="scan" inputmode="none" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Waiting for scanner…"><div id="dbg" style="font-size:.75rem;color:var(--steel)">Scanner readout: waiting for a key</div></div>
+  <div id="cur">Pick a mode, then scan a pack label.</div>
+  <div id="opts" class="card"></div>
   <div id="modearea"></div>
-
-  <div class="row"><input type="text" id="note" placeholder="Note (people only, saved with each scan)" aria-label="Note"></div>
 
   <div class="sec">Recent scans</div>
   <ul class="list" id="recent"></ul>
+
+  <div class="card" id="scanset">
+    <div class="row" style="margin-top:0"><select id="src" aria-label="Input source"><option value="cam">Input: phone camera</option><option value="bt">Input: handheld Bluetooth scanner</option></select></div>
+    <div class="row camonly">
+      <select id="auto" class="half" aria-label="Scan mode"><option value="1">Auto scan</option><option value="0" selected>Tap to capture</option></select>
+      <select id="dup" class="half" aria-label="Repeat rule"><option value="rearm">Repeat after code leaves frame</option><option value="strict" selected>No repeat until new code</option></select>
+    </div>
+    <div class="row" style="margin-bottom:0"><input type="text" id="note" placeholder="Note (people only, saved with each scan)" aria-label="Note"></div>
+  </div>
 </section>
 
 <p id="info"></p>
@@ -130,7 +132,7 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
 
 <script>
 /* ============================== constants ============================== */
-const BUILD='vB0.1.4';
+const BUILD='vB0.1.5';
 const DEFAULT_URL='https://script.google.com/macros/s/AKfycbyx2IrRDLzrY4J_yH5TUdAi8QVsR4hpaZvZeYHevBeIUjIxjGNHkjU9S1_ooV4S2Yvn/exec';   // paste the Apps Script web app address (ending /exec) between the quotes and the phones need no setup for it   // keep in step with V in sw.js
 const ROLES=[
  {name:'Meat Packing',sub:'IN: put new packs into stock'},
@@ -203,8 +205,17 @@ function showStatus(){
   if(queue.length>20)cls='bad';
   e.textContent=t.join(' · ');e.className=cls;
 }
+/* Packs with a unique (GS1) label are scanned once per session: stocktake, or a 12 hour packing period per mode. */
+const SESS_MS=12*3600*1000,NOSESS={Sell:1,'Build box':1,'Fix-ups':1};
+let seenS=(()=>{const o=LS('seen',{}),now=Date.now();Object.keys(o).forEach(k=>{Object.keys(o[k]).forEach(c=>{if(now-o[k][c].t>SESS_MS)delete o[k][c]});if(!Object.keys(o[k]).length)delete o[k]});return o})();
+const sessKey=()=>mode==='Stocktake'?'Stocktake|'+(st&&st.id||''):mode;
+const sessOn=()=>!!mode&&!NOSESS[mode]&&!(mode==='Stocktake'&&!st);
+const sessSeen=ser=>{const k=sessKey(),e=seenS[k]&&seenS[k][ser];return!!e&&Date.now()-e.t<=SESS_MS};
+function sessMark(ser,id){if(!sessOn())return;const k=sessKey();(seenS[k]=seenS[k]||{})[ser]={t:Date.now(),id};SV('seen',seenS)}
+function sessUnmark(ids){Object.keys(seenS).forEach(k=>Object.keys(seenS[k]).forEach(c=>{if(ids.indexOf(seenS[k][c].id)>=0)delete seenS[k][c]}));SV('seen',seenS)}
 function enqueue(events,label,extra){
   const ids=events.map(e=>e.id);
+  events.forEach(e=>{if(e.type!=='Void'&&e.barcode){const p=parseScan(e.barcode);if(p.kind==='gs1')sessMark(p.serial,e.id)}});
   events.forEach(e=>queue.push(e));
   recent.push(Object.assign({ids,label,time:nowIso(),status:'queued',warn:'',voided:false},extra||{}));
   saveQ();renderRecent();flush();
@@ -350,7 +361,9 @@ function mkEvent(type,barcode,o){
     animalCode:'',farmOrigin:'',variant:'',role,device:cfg.device,build:BUILD,qty:1},o||{});
 }
 const tempFor=(pr,m)=>(pr.kind==='gs1'&&m!=='IN')?'':sticky.temp;
-const labelOf=(pr,a)=>a&&a.p?a.p.name+' · '+(a.band===0?'item':a.band+' g'):(pr.kind==='box'?'Box '+pr.code:pr.code);
+const longCode=t=>{t=String(t==null?'':t);return t.length>22||/[()\x00-\x1f]/.test(t)};
+const bn=id=>longCode(id)?'…'+String(id).replace(/[()\x00-\x1f]/g,'').slice(-8):String(id==null?'':id);   // short display form of a long box code
+const labelOf=(pr,a)=>a&&a.p?a.p.name+' · '+(a.band===0?'item':a.band+' g'):(pr.kind==='box'?'Box '+bn(pr.code):(pr.kind==='gs1'?'PLU '+pr.plu+' (new label)':(longCode(pr.code)?'Unrecognised code':pr.code)));
 
 /* ============================== screens ============================== */
 function el(tag,attrs,html){const e=document.createElement(tag);Object.keys(attrs||{}).forEach(k=>e.setAttribute(k,attrs[k]));if(html!=null)e.innerHTML=html;return e}
@@ -432,7 +445,7 @@ async function undo(i){
   const r=recent[i];if(!r||r.voided)return;
   if(!await confirmD('Undo this scan?','<p>'+esc(r.label)+'</p><p>A cancelling entry is added. The original stays in the log.</p>','Undo'))return;
   const evs=r.ids.map(id=>mkEvent('Void','',{linked:id,note:'Undo: '+r.label}));
-  r.voided=true;evs.forEach(e=>queue.push(e));
+  r.voided=true;sessUnmark(r.ids);evs.forEach(e=>queue.push(e));
   recent.push({ids:evs.map(e=>e.id),label:'Undo: '+r.label,time:nowIso(),status:'queued',warn:'',voided:false,noUndo:true});
   saveQ();renderRecent();flush();
 }
@@ -459,7 +472,7 @@ function dupCheck(pr,a,type){
 
 /* ============================== scan handling ============================== */
 function scanBad(t,why){
-  badTone();showCard('bad','<div class="big">Not a valid pack barcode</div><div class="mut">'+esc(why||'')+'</div><b>'+esc(t||'(empty)')+'</b>');
+  badTone();showCard('bad','<div class="big">Not a valid pack barcode</div><div class="mut">'+esc(why||'')+'</div>'+(longCode(t)?'':'<b>'+esc(t||'(empty)')+'</b>'));
 }
 async function onScan(raw,pre){
   if(modalOpen||!mode)return;
@@ -469,6 +482,9 @@ async function onScan(raw,pre){
   const known=pr.kind!=='none'?findBoxByScan(pr.code||pr.raw):null;
   if(known){pr.kind='box';pr.boxRec=known;pr.code=known.id}
   if(pr.kind==='none'||pr.kind==='other')return scanBad(pr.raw,'Only pack labels and box labels are accepted.');
+  if(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial)){
+    warnTone();const a0=analyse(pr,sticky.temp,'');showCard('hold','<div class="big">Already scanned</div><div class="mut">'+esc(labelOf(pr,a0))+' was already scanned in this '+(mode==='Stocktake'?'stocktake':'session')+', so it was not counted again. If that earlier scan was a mistake, use Undo in Recent scans.</div>');return;
+  }
   try{
     if(mode==='IN')return await doIn(pr);
     if(mode==='Pick')return await doPick(pr);
@@ -544,14 +560,14 @@ async function doBoxAction(pr,type,f){
   enqueue(evs,mode+' box '+b.id+' ('+b.packs.length+' packs)');
   if(type==='Freeze'||type==='Thaw')setBoxTemp(b,t);
   okTone();
-  showCard('ok','<div class="big">Box '+esc(b.id)+'</div><div class="mut">'+b.packs.length+' packs · '+esc(mode)+(f.type2?' · '+esc(f.type2):'')+(t?' · now '+esc(t.toLowerCase()):'')+'</div>');
+  showCard('ok','<div class="big">Box '+esc(bn(b.id))+'</div><div class="mut">'+b.packs.length+' packs · '+esc(mode)+(f.type2?' · '+esc(f.type2):'')+(t?' · now '+esc(t.toLowerCase()):'')+'</div>');
 }
 function boxTypes(){const s={};allBoxes().forEach(b=>{if(b.type)s[b.type]=1});return Object.keys(s)}
 const SRC_SEG=(id,label,val)=>'<label class="f">'+label+'</label>'+seg(id,[{v:'Chilled',t:'Chilled'},{v:'Frozen',t:'Frozen'}],val);
 function renderBox(){
   const u=$('boxui');if(!u)return;
   if(doneBox){
-    u.innerHTML='<div class="big" style="font-weight:700">Box saved</div><div class="mut" style="font-size:.9rem;color:var(--steel)">'+esc(doneBox.id)+'<br>'+doneBox.packs.length+' packs · '+esc(doneBox.type)+' · '+esc(doneBox.temp)+'</div><button id="bnew" class="go" style="width:100%;margin-top:8px">Build another box</button>';
+    u.innerHTML='<div class="big" style="font-weight:700">Box saved</div><div class="mut" style="font-size:.9rem;color:var(--steel)">'+esc(bn(doneBox.id))+'<br>'+doneBox.packs.length+' packs · '+esc(doneBox.type)+' · '+esc(doneBox.temp)+'</div><button id="bnew" class="go" style="width:100%;margin-top:8px">Build another box</button>';
     $('bnew').onclick=()=>{doneBox=null;renderBox()};return;
   }
   if(!boxB){
@@ -592,7 +608,7 @@ async function doBoxLabel(pr){
     id=code+'#'+(same.length+1);
   }
   const b={id,type:boxB.type,temp:boxB.temp,price:pr.kind==='ean13'&&pr.price!==''?pr.price:'',packs:boxB.packs,label:code};
-  if(!await confirmD('Finish this box?','<p>Label <b>'+esc(code)+'</b><br>'+b.packs.length+' packs go into this '+esc(b.type)+' box ('+esc(b.temp)+')'+(b.packs.some(p=>p.src!==b.temp)?'. Packs at the other temperature are '+(b.temp==='Frozen'?'frozen':'thawed')+' as they go in':'')+'.</p>','Finish box'))return;
+  if(!await confirmD('Finish this box?','<p>Label <b>'+esc(bn(code))+'</b><br>'+b.packs.length+' packs go into this '+esc(b.type)+' box ('+esc(b.temp)+')'+(b.packs.some(p=>p.src!==b.temp)?'. Packs at the other temperature are '+(b.temp==='Frozen'?'frozen':'thawed')+' as they go in':'')+'.</p>','Finish box'))return;
   const evs=[],tc=b.temp==='Frozen'?'Freeze':'Thaw';
   b.packs.forEach(p=>{if(p.src!==b.temp)evs.push(mkEvent(tc,p.code,{temperature:b.temp}))});
   b.packs.forEach(p=>evs.push(mkEvent('Box',p.code,{reference:boxRef(b),note:b.type,temperature:b.temp})));
@@ -603,7 +619,7 @@ async function doBoxLabel(pr){
 }
 function renderUnbox(){
   const s=$('o_box');if(!s)return;
-  s.innerHTML='<option value="">Choose a box…</option>'+allBoxes().map(b=>'<option value="'+esc(b.id)+'">'+esc(b.id)+' · '+esc(b.type||'')+' · '+esc(b.temp||'')+' · '+b.packs.length+' packs</option>').join('');
+  s.innerHTML='<option value="">Choose a box…</option>'+allBoxes().map(b=>'<option value="'+esc(b.id)+'">'+esc(bn(b.id))+' · '+esc(b.type||'')+' · '+esc(b.temp||'')+' · '+b.packs.length+' packs</option>').join('');
   $('o_unbox').onclick=()=>{if($('o_box').value)unpackBox(findBox($('o_box').value))};
 }
 async function unpackBox(b){
@@ -613,7 +629,7 @@ async function unpackBox(b){
   enqueue(evs,'Unpack box '+b.id+' ('+b.packs.length+' packs)');
   const lb=LS('localBoxes',[]).filter(x=>x.id!==b.id);SV('localBoxes',lb);
   if(ref&&ref.boxes){ref.boxes=ref.boxes.filter(x=>x.id!==b.id);SV('ref',ref)}
-  okTone();showCard('ok','<div class="big">Box '+esc(b.id)+' unpacked</div><div class="mut">'+b.packs.length+' packs back in stock</div>');renderUnbox();
+  okTone();showCard('ok','<div class="big">Box '+esc(bn(b.id))+' unpacked</div><div class="mut">'+b.packs.length+' packs back in stock</div>');renderUnbox();
 }
 async function doUnpackScan(pr){
   if(pr.kind==='box')return unpackBox(pr.boxRec||findBox(pr.code));
@@ -626,7 +642,7 @@ function doBasket(pr){
   if(pr.kind==='box'){
     const b=pr.boxRec||findBox(pr.code);if(!b)return scanBad(pr.code,'This box is not in the data on this phone.');
     if(basket.some(x=>x.box&&x.box.id===b.id))return scanBad(pr.code,'That box is already in the sale.');
-    basket.push({box:b,pr,sell:b.price!==''&&b.price!=null?Number(b.price).toFixed(2):(pr.kind==='ean13'&&pr.price!==''?Number(pr.price).toFixed(2):'')});bsel=basket.length-1;okTone();showCard('ok','<div class="big">Box '+esc(b.id)+'</div><div class="mut">'+b.packs.length+' packs · set the box price with Change price</div>');renderBasket();return;
+    basket.push({box:b,pr,sell:b.price!==''&&b.price!=null?Number(b.price).toFixed(2):(pr.kind==='ean13'&&pr.price!==''?Number(pr.price).toFixed(2):'')});bsel=basket.length-1;okTone();showCard('ok','<div class="big">Box '+esc(bn(b.id))+'</div><div class="mut">'+b.packs.length+' packs · set the box price with Change price</div>');renderBasket();return;
   }
   const temp=tempFor(pr,mode),a=analyse(pr,temp||'Chilled',''),info=stockInfo(a,temp||'Chilled'),warn=[];
   if(pr.kind==='gs1'&&basket.some(x=>x.pr.code===pr.code))return scanBad(pr.code,'That pack is already in the sale.');
@@ -638,7 +654,7 @@ function doBasket(pr){
 }
 function renderBasket(){
   const u=$('items');if(!u)return;
-  u.innerHTML=basket.map((x,i)=>'<li data-i="'+i+'"'+(i===bsel?' class="sel"':'')+'>'+(i+1)+'. '+(x.box?'Box '+esc(x.box.id)+' · '+x.box.packs.length+' packs':esc(labelOf(x.pr,x.a))+' · '+(x.pr.kg!==''&&x.pr.kg>0.0011?x.pr.kg.toFixed(3)+' kg · ':''))+(x.sell!==''?'$'+x.sell:'<b>no price</b>')+'</li>').join('');
+  u.innerHTML=basket.map((x,i)=>'<li data-i="'+i+'"'+(i===bsel?' class="sel"':'')+'>'+(i+1)+'. '+(x.box?'Box '+esc(bn(x.box.id))+' · '+x.box.packs.length+' packs':esc(labelOf(x.pr,x.a))+' · '+(x.pr.kg!==''&&x.pr.kg>0.0011?x.pr.kg.toFixed(3)+' kg · ':''))+(x.sell!==''?'$'+x.sell:'<b>no price</b>')+'</li>').join('');
   const p=basket.reduce((a,x)=>a+(+x.sell||0),0),k=basket.reduce((a,x)=>a+(x.pr.kg>0.0011?+x.pr.kg:0),0);
   $('tot').textContent=basket.length+' items · '+k.toFixed(2)+' kg · $'+p.toFixed(2);
 }
@@ -747,9 +763,9 @@ function renderFix(){
 
 /* ============================== camera and detection ============================== */
 const v=$('v'),o=$('o'),ctx=o.getContext('2d'),cv=document.createElement('canvas'),cx=cv.getContext('2d');
-let stream,track,running=false,det,zx,lastTick=0,lastActive=0,lastCap='',lastCapSeen=0,seen=null,seenN=0,cand=null,torchOn=false;
+let stream,track,running=false,det,zx,lastTick=0,lastActive=0,torchOn=false,caps={},capN=0,stab={},polys=[];
 const msg=t=>$('msg').textContent=t;
-function capture(raw){lastCap=raw;lastCapSeen=performance.now();onScan(raw)}
+function capture(raw){if(modalOpen)return;capN++;caps[raw]={seen:performance.now(),order:capN};onScan(raw)}
 async function loadZX(){
   if(window.ZXing)return;
   await new Promise((ok,no)=>{const s=document.createElement('script');s.src='https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js';s.onload=ok;s.onerror=no;document.head.appendChild(s)});
@@ -767,36 +783,45 @@ async function detect(){
     return[{raw:r.getText(),pts:r.getResultPoints().map(p=>[p.getX()*k,p.getY()*k])}]}catch(e){return[]}
 }
 function draw(list){
-  o.width=o.clientWidth;o.height=o.clientHeight;ctx.clearRect(0,0,o.width,o.height);
+  o.width=o.clientWidth;o.height=o.clientHeight;ctx.clearRect(0,0,o.width,o.height);polys=[];
   const vw=v.videoWidth,vh=v.videoHeight,s=Math.max(o.width/vw,o.height/vh),dx=(o.width-vw*s)/2,dy=(o.height-vh*s)/2;
   for(const it of list){
     let p=it.pts.map(([x,y])=>[x*s+dx,y*s+dy]);
     if(p.length<4){const xs=p.map(a=>a[0]),ys=p.map(a=>a[1]),a=Math.min(...xs)-14,b=Math.min(...ys)-30,c=Math.max(...xs)+14,d=Math.max(...ys)+30;p=[[a,b],[c,b],[c,d],[a,d]]}
-    ctx.beginPath();p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();ctx.lineWidth=6;ctx.lineJoin='round';ctx.strokeStyle=it.color;ctx.stroke();
+    ctx.beginPath();p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();
+    ctx.fillStyle=it.color+'33';ctx.fill();ctx.lineWidth=6;ctx.lineJoin='round';ctx.strokeStyle=it.color;ctx.stroke();
+    polys.push({p,raw:it.raw});
   }
 }
+/* Every code in view gets a box: green = can be captured, amber = already captured / already scanned this session.
+   Auto scan captures each new code once it has been steady for two frames; otherwise the user taps a box. */
 function handle(list,now){
-  const auto=$('auto').value==='1',strict=$('dup').value==='strict';
-  cand=null;let blocked=false;
+  const auto=$('auto').value==='1',strict=$('dup').value==='strict',inView={};let todo=null;
   for(const it of list){
-    cand=cand||it.raw;
-    const dup=it.raw===lastCap&&(strict||now-lastCapSeen<REARM);
-    if(it.raw===lastCap)lastCapSeen=now;
-    it.color=(auto&&dup)?HOLD:GO;if(auto&&dup)blocked=true;
+    inView[it.raw]=1;const pr=parseScan(it.raw),c=caps[it.raw];if(c)c.seen=now;
+    const blocked=!!c||(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial));
+    it.color=blocked?HOLD:GO;stab[it.raw]=(stab[it.raw]||0)+1;
+    if(!blocked&&!todo&&stab[it.raw]>=2)todo=it;
   }
+  Object.keys(stab).forEach(k=>{if(!inView[k])delete stab[k]});
+  Object.keys(caps).forEach(k=>{const c=caps[k];if(!inView[k]&&now-c.seen>REARM&&(!strict||capN>c.order))delete caps[k]});
   if(list.length)lastActive=now;
-  if(cand&&cand===seen)seenN++;else{seen=cand;seenN=cand?1:0}
-  $('cap').disabled=auto||!cand;$('cap').classList.toggle('ready',!auto&&!!cand);
-  $('cap').textContent=auto?'Capture (auto scan is on)':'Capture';
-  if(auto&&cand&&!blocked&&seenN>=2)capture(cand);
+  if(auto&&todo)capture(todo.raw);
   draw(list);
 }
+$('cam').addEventListener('pointerdown',e=>{
+  if(!running||!polys.length)return;
+  const r=o.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;let best=null,bd=1e9;
+  polys.forEach(pl=>{const xs=pl.p.map(a=>a[0]),ys=pl.p.map(a=>a[1]),x0=Math.min(...xs)-16,x1=Math.max(...xs)+16,y0=Math.min(...ys)-16,y1=Math.max(...ys)+16;
+    if(x>=x0&&x<=x1&&y>=y0&&y<=y1){const d=Math.hypot(x-(x0+x1)/2,y-(y0+y1)/2);if(d<bd){bd=d;best=pl}}});
+  if(best)capture(best.raw);
+});
 async function tick(){
   if(!running)return;const now=performance.now();
   if(now-lastTick>90&&v.readyState>=2){lastTick=now;let l=[];try{l=await detect()}catch(e){}handle(l,now)}
   const left=IDLE-(now-lastActive);
   if(left<=0)return stop('Camera paused after 60 s idle. Tap Enable camera.');
-  msg(left<15000?'Camera sleeps in '+Math.ceil(left/1000)+' s':'Camera on · sleeps after 60 s idle');
+  msg(left<15000?'Camera sleeps in '+Math.ceil(left/1000)+' s':($('auto').value==='1'?'Auto scan on':'Tap a green box to capture')+' · sleeps after 60 s idle');
   requestAnimationFrame(tick);
 }
 async function start(){
@@ -810,11 +835,10 @@ async function start(){
 }
 function stop(m){
   running=false;lock(false);if(stream)stream.getTracks().forEach(t=>t.stop());v.srcObject=null;torchOn=false;
-  ctx.clearRect(0,0,o.width,o.height);$('power').textContent='Enable camera';$('cap').disabled=true;msg(m||'Camera is off');
+  ctx.clearRect(0,0,o.width,o.height);$('power').textContent='Enable camera';msg(m||'Camera is off');
 }
 $('power').onclick=()=>running?stop():start();
 $('torch').onclick=()=>{torchOn=!torchOn;track.applyConstraints({advanced:[{torch:torchOn}]})};
-$('cap').onclick=()=>{if(cand)capture(cand)};
 document.addEventListener('pointerdown',()=>lastActive=performance.now());
 document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)stop('Camera paused while the app is in the background.')});
 let wl;
