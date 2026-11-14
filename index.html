@@ -134,7 +134,7 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
 
 <script>
 /* ============================== constants ============================== */
-const BUILD='vB0.1.7';
+const BUILD='vB0.2.0';
 const DEFAULT_URL='https://script.google.com/macros/s/AKfycbyx2IrRDLzrY4J_yH5TUdAi8QVsR4hpaZvZeYHevBeIUjIxjGNHkjU9S1_ooV4S2Yvn/exec';   // paste the Apps Script web app address (ending /exec) between the quotes and the phones need no setup for it   // keep in step with V in sw.js
 const ROLES=[
  {name:'Meat Packing',sub:'IN: put new packs into stock'},
@@ -150,7 +150,7 @@ const RETURN_FROM=['Market NFM','Market MOT','Market TAK','Shop','Special order'
 const WRITEOFF_WHY=['Damaged','Out of date','Mislabelled','Dropped','Quality','Other'];
 const ST_LOCS=['Chiller','Freezer','Shop','Market'];
 const REMOVES={Sell:1,Out:1,Writeoff:1,Offline:1,Missing:1};   // actions that can take a pack out of the online pool
-const GO='#1fb85a',HOLD='#f0a020',IDLE=60000,REARM=1500;
+const GO='#1fb85a',HOLD='#f2c200',IDLE=60000,REARM=1500;
 
 /* ============================== state ============================== */
 const $=id=>document.getElementById(id);
@@ -385,7 +385,7 @@ function renderOpts(){
       '<label class="f" for="o_origin">Farm origin (default ECF; clear it if not needed)</label><input type="text" id="o_origin" value="'+esc(sticky.origin)+'" autocomplete="off">'+
       '<div id="o_var" class="mut" style="font-size:.85rem;color:var(--steel)">'+(v.suffix?'Variant: '+esc(v.name)+(v.multi?' (origin matches more than one variant)':''):'Variant: Ellis Creek (default)')+'</div>'+
       '<label class="f" for="o_animal">Animal code</label><input type="text" id="o_animal" value="'+esc(sticky.animal)+'" autocomplete="off">';
-  }else if(mode==='Pick'){h='<div class="sec" style="margin-top:0">Open web orders</div><div id="picklist"></div>'}
+  }else if(mode==='Pick'){h='<div id="picklist"></div>'}
   else if(mode==='Out'){h='<label class="f">Send to</label>'+sel('o_dest',OUT_DEST,sticky.dest)+refRow+TEMP_SEG()}
   else if(mode==='Return'){h='<label class="f">Coming back from</label>'+sel('o_from',RETURN_FROM,sticky.from)+'<label class="f">Channel</label>'+seg('o_online',[{v:'',t:'Offline only'},{v:'Online',t:'Online'}],sticky.online==='Online'?'Online':'')+TEMP_SEG()}
   else if(mode==='Freeze'||mode==='Thaw'){h='<div class="mut" style="font-size:.85rem;color:var(--steel)">Scan each pack to '+mode.toLowerCase()+', or scan a box label to '+mode.toLowerCase()+' the whole box.</div>'}
@@ -416,7 +416,7 @@ function setMode(m){
   mode=m;$('note').value='';doneBox=null;
   Array.prototype.forEach.call($('modes').children,b=>b.classList.toggle('on',b.textContent===m));
   basket=[];bsel=-1;
-  $('cur').className='';$('cur').textContent=({IN:'Scan each new pack to put it into stock.',Pick:'Scan the pack you take for each order line.',Sell:'Scan items to build the sale.',Stocktake:st?'Session in progress: '+st.n+' packs counted. Nothing is sent until you complete it.':'Start a stocktake session, then scan every pack. Nothing is sent until you complete it.'})[m]||'Mode: '+m+'. Each scan is saved straight away.';
+  $('cur').className='';$('cur').textContent=({IN:'Scan each new pack to put it into stock.',Pick:'Touch an order to start picking, or scan the barcode on its packing slip.',Sell:'Scan items to build the sale.',Stocktake:st?'Session in progress: '+st.n+' packs counted. Nothing is sent until you complete it.':'Start a stocktake session, then scan every pack. Nothing is sent until you complete it.'})[m]||'Mode: '+m+'. Each scan is saved straight away.';
   renderOpts();focusScan();
 }
 function setRole(r){
@@ -480,6 +480,7 @@ function scanBad(t,why){
 async function onScan(raw,pre){
   if(modalOpen||!mode)return;
   const pr=pre||parseScan(raw);
+  if(mode==='Pick'){const oid=orderFromScan(raw!=null?raw:pr.raw);if(oid){openOrder(oid);okTone();return}}
   if(pr.err&&!(mode==='Build box'&&boxB&&boxB.awaiting))return scanBad(pr.raw,pr.err);
   if(mode==='Build box'&&boxB&&boxB.awaiting&&pr.kind!=='none')return doBoxLabel(pr);
   const known=pr.kind!=='none'?findBoxByScan(pr.code||pr.raw):null;
@@ -686,32 +687,105 @@ async function saveSale(){
 }
 /* Pick list */
 const noVar=k=>String(k).replace(/-[A-Z][A-Z0-9]*(?=-\d+-[CF]$)/,'');
+const AMBIENT_TYPES=['Produce'];          // product Types that are not meat: picked from ambient shelves
+let pickOrd=null;                         // order id being picked (null = showing the list of orders)
+function lineInfo(l){
+  const m=/^([^-]+)(?:-([A-Z][A-Z0-9]*))?-(\d+)-([CF])$/.exec(String(l.key||'')),plu=m?m[1]:'',t=m?m[4]:'C',p=PM[plu]||null;
+  return{plu,band:m?+m[3]:0,t,p,grp:(p&&AMBIENT_TYPES.indexOf(p.type)>=0)?'Ambient':(t==='F'?'Frozen':'Chilled')};
+}
+const rangeCache={};
+/* Pack weights that land in this line's band (worked out with the same band rule the scan uses, at the schedule price). */
+function weightRange(l){
+  const li=lineInfo(l),p=li.p;
+  if(!p||!(li.band>0))return li.grp==='Ambient'?'1 item':'Any weight';
+  if(p.inc>=1000||(p.fixedG!==''&&p.fixedG!=null))return'Fixed pack, about '+li.band+' g';
+  const ck=l.key+'|'+p.price;if(rangeCache[ck])return rangeCache[ck];
+  let lo=0,hi=0;const price=+p.price||0;
+  for(let w=10;w<=Math.max(6000,li.band*2);w++){
+    const r=bandFor(w/1000,Math.round(w/1000*price*100)/100,p,ref.settings);
+    if(r.band===li.band&&!r.tooLow){if(!lo)lo=w;hi=w}
+  }
+  return rangeCache[ck]=lo?(lo===hi?lo+' g':lo+' to '+hi+' g'):'About '+li.band+' g';
+}
+function ordersList(){
+  const by={};
+  ((ref&&ref.pickList)||[]).forEach(l=>{
+    const o=by[l.order]=by[l.order]||{id:String(l.order),customer:'',created:'',lines:[]};
+    if(!o.customer&&l.customer)o.customer=String(l.customer);
+    if(l.created&&(!o.created||String(l.created)<o.created))o.created=String(l.created);
+    o.lines.push(l);
+  });
+  return Object.keys(by).map(k=>{
+    const o=by[k];o.q=o.lines.reduce((n,l)=>n+(+l.qty||0),0);o.p=o.lines.reduce((n,l)=>n+Math.min(+l.qty||0,+l.picked||0),0);o.done=o.q>0&&o.p>=o.q;return o;
+  }).sort((a,b)=>String(a.created||'~').localeCompare(String(b.created||'~'))||a.id.localeCompare(b.id,undefined,{numeric:true}));
+}
+const orderTitle=o=>(o.customer?esc(o.customer)+' · ':'')+'<span style="white-space:nowrap">Order '+esc(o.id)+'</span>';
+/* An order barcode on a packing slip is the order id, optionally written ORD:<id> or ORDER:<id>. */
+function orderFromScan(raw){
+  const t=String(raw==null?'':raw).trim().replace(/^\](d2|Q3|C1)/,'').replace(/^[\x1d~|]+/,'');
+  const id=t.replace(/^(?:ECF-)?ORD(?:ER)?[:#\s-]+/i,'').toLowerCase(),ids=ordersList().map(o=>o.id);
+  return ids.find(i=>i.toLowerCase()===id)||ids.find(i=>i.toLowerCase()===t.toLowerCase())||null;
+}
+function openOrder(id){pickOrd=id;renderPick();resetCur('Picking order '+id+'. Scan each pack you take.');const e=$('picklist');if(e)e.scrollIntoView({block:'nearest'})}
+/* The unpicked line of the open order that this pack fills (it must match the product and weight band exactly). */
+function pickMatch(pr,o){
+  o=o||ordersList().find(x=>x.id===pickOrd);if(!o||pr.err||(pr.kind!=='ean13'&&pr.kind!=='gs1'))return null;
+  for(const t of['C','F']){const a=analyse(pr,t,'');const line=o.lines.find(l=>(+l.qty||0)>(+l.picked||0)&&noVar(l.key)===a.key);if(line)return{line,t,a}}
+  return null;
+}
+const pickOk=(raw,pr)=>!!orderFromScan(raw)||(!!pickOrd&&!!pickMatch(pr));
 function renderPick(){
-  const d=$('picklist');if(!d)return;const pl=(ref&&ref.pickList)||[];
-  if(!pl.length){d.innerHTML='<div class="sub">No open orders in the data on this phone'+(ref&&ref.fetched?' (data from '+hhmm(ref.fetched)+')':'')+'.</div>';return}
-  const by={};pl.forEach(l=>{(by[l.order]=by[l.order]||[]).push(l)});
-  d.innerHTML=Object.keys(by).map(o=>'<div class="sec" style="margin:8px 0 2px">Order '+esc(o)+'</div>'+by[o].map(l=>{
-    const q=+l.qty||0,p=Math.min(q,+l.picked||0);
-    return'<div class="card" style="margin:4px 0"><div class="line"><b>'+esc(l.product||nameOfKey(l.key))+'</b><span>'+p+' / '+q+'</span></div><div class="mut" style="font-size:.8rem;color:var(--steel)">'+esc(l.key)+' · '+(/-F$/.test(l.key)?'Freezer':'Chiller')+'</div><div class="prog"><i style="width:'+(q?p/q*100:0)+'%"></i></div></div>'}).join('')).join('');
+  const d=$('picklist');if(!d)return;
+  const all=ordersList(),o=pickOrd?all.find(x=>x.id===pickOrd):null;
+  if(pickOrd&&!o)pickOrd=null;
+  if(!o){
+    if(!all.length){d.innerHTML='<div class="sub">No open orders in the data on this phone'+(ref&&ref.fetched?' (data from '+hhmm(ref.fetched)+')':'')+'.</div>';return}
+    d.innerHTML='<div class="sec" style="margin-top:0">Open web orders, oldest first</div>'+all.map(x=>
+      '<div class="card ord" data-o="'+esc(x.id)+'" role="button" tabindex="0" style="margin:6px 0;cursor:pointer;border-left:10px solid '+(x.done?'var(--go,#1fb85a)':'#d64545')+'"><div class="line"><b>'+orderTitle(x)+'</b><span>'+x.p+' / '+x.q+'</span></div>'+
+      '<div class="mut" style="font-size:.8rem;color:var(--steel)">'+(x.created?esc(new Date(x.created).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}))+' · ':'')+x.lines.length+' line'+(x.lines.length>1?'s':'')+(x.done?' · <b style="color:#168a43">Picked, complete</b>':' · still to pick')+'</div>'+
+      '<div class="prog"><i style="width:'+(x.q?x.p/x.q*100:0)+'%"></i></div></div>').join('');
+    d.querySelectorAll('.ord').forEach(e=>{e.onclick=()=>openOrder(e.dataset.o);e.onkeydown=ev=>{if(ev.key==='Enter')openOrder(e.dataset.o)}});
+    return;
+  }
+  const groups=['Chilled','Frozen','Ambient'].map(g=>({g,ls:o.lines.filter(l=>lineInfo(l).grp===g)})).filter(x=>x.ls.length);
+  d.innerHTML='<div class="row" style="margin:0 0 6px"><button id="po_back" class="ghost sm">← All orders</button></div>'+
+    '<div class="card" style="border:4px solid '+(o.done?'#1fb85a':'#d64545')+'"><div class="line"><b style="font-size:1.1rem">'+orderTitle(o)+'</b><span>'+o.p+' / '+o.q+'</span></div>'+
+    '<div class="mut" style="font-size:.85rem;margin:2px 0 6px;color:'+(o.done?'#168a43':'#b03030')+'">'+(o.done?'All items picked. Set the order to Complete in WooCommerce (not done by this app).':'Still to pick: '+(o.q-o.p)+' item'+(o.q-o.p>1?'s':''))+'</div>'+
+    groups.map(x=>'<div class="sec" style="margin:10px 0 2px">'+x.g+'</div>'+x.ls.map(l=>{
+      const q=+l.qty||0,p=Math.min(q,+l.picked||0),full=p>=q,subs=String(l.subs||'').split(' | ').filter(Boolean);
+      return'<div class="card" style="margin:4px 0;background:'+(full?'#eef9f1':'#fff')+'"><div class="line"><b>'+esc(l.product||nameOfKey(l.key))+'</b><span>'+(q>1?p+' / '+q:(full?'Picked ✓':'To pick'))+'</span></div>'+
+        '<div class="mut" style="font-size:.8rem;color:var(--steel)">Acceptable weight: '+esc(weightRange(l))+'</div>'+
+        (q>1?'<div class="prog"><i style="width:'+(q?p/q*100:0)+'%"></i></div>':'')+
+        subs.map(sb=>'<div style="color:#c0392b;font-size:.82rem;margin-top:3px">Substituted: '+esc(sb)+'</div>').join('')+'</div>'}).join('')).join('')+'</div>';
+  $('po_back').onclick=()=>{pickOrd=null;renderPick();resetCur('Touch an order to start picking, or scan the barcode on its packing slip.')};
 }
 async function doPick(pr){
   if(pr.kind==='box')return scanBad(pr.code,'Box lines are not on the pick list yet.');
-  const pl=(ref&&ref.pickList)||[];
-  const cands=['C','F'].map(t=>({t,a:analyse(pr,t,'')}));
-  let hit=null;
-  for(const c of cands){hit=pl.find(l=>(+l.qty||0)>(+l.picked||0)&&noVar(l.key)===c.a.key);if(hit){hit.a=c.a;hit.t=c.t;break}}
-  if(!hit){
-    warnTone();const a=cands[0].a;
-    showCard('hold',packHtml(pr,a,'<div class="mut">This pack is not on any open order line (or the line is already full).</div>',[['Not on the pick list','amber']]));
-    if(!await confirmD('Not on the pick list','<p>'+esc(labelOf(pr,a))+' does not match an open order line. Log it as a web order sale anyway?</p>','Log anyway'))return;
-    const ev=mkEvent('Sell',pr.code,{type2:'Web order',temperature:tempFor(pr,mode)});enqueue([ev],'Web order (no line) '+labelOf(pr,a));okTone();return;
+  const o=pickOrd&&ordersList().find(x=>x.id===pickOrd);
+  if(!o){warnTone();return showCard('hold','<div class="big">Open an order first</div><div class="mut">Touch an order in the list, or scan the barcode on its packing slip, then scan the packs for it.</div>')}
+  const m=pickMatch(pr,o);
+  if(!m){
+    warnTone();const a=analyse(pr,'C','');
+    const open=o.lines.filter(l=>(+l.qty||0)>(+l.picked||0));
+    showCard('hold',packHtml(pr,a,'<div class="mut">Not an item still to pick on order '+esc(o.id)+'.</div>',[['Not on this order','amber']]));
+    if(!open.length)return;
+    const line=await dlg('Substitute this pack?','<p><b>'+esc(labelOf(pr,a))+'</b> is not an item still to pick on this order. Which item is it replacing?</p>',
+      open.map(l=>({t:(l.product||nameOfKey(l.key))+' ('+(+l.picked||0)+' / '+l.qty+')',v:l,c:'ghost'})).concat([{t:'Cancel, do not use it',v:null,c:'ghost'}]));
+    if(!line)return;
+    if(!await shortGate([{name:labelOf(pr,a),info:stockInfo(a,'C')}]))return;
+    const vs=/-([A-Z][A-Z0-9]*)-\d+-[CF]$/.exec(a.key||''),what=labelOf(pr,a);
+    const ev=mkEvent('Sell',pr.code,{type2:'Web order',reference:o.id,temperature:tempFor(pr,mode),variant:vs?vs[1]:'',note:'SUB['+(line.line||'')+'] '+what});
+    line.picked=(+line.picked||0)+1;line.subs=(line.subs?line.subs+' | ':'')+what;SV('ref',ref);
+    enqueue([ev],'Order '+o.id+' · substituted '+what);okTone();
+    showCard('ok',packHtml(pr,a,'<div style="color:#c0392b">Substituted for '+esc(line.product||nameOfKey(line.key))+'</div><div class="mut">Order '+esc(o.id)+'</div>',[['Order '+o.id,'green']]));renderPick();return;
   }
-  const a=hit.a,vm=/-([A-Z][A-Z0-9]*)-\d+-[CF]$/.exec(hit.key);
-  if(!await shortGate([{name:labelOf(pr,a),info:stockInfo(a,hit.t)}]))return;
-  const ev=mkEvent('Sell',pr.code,{type2:'Web order',reference:hit.order,temperature:hit.t==='F'?'Frozen':'Chilled',variant:vm?vm[1]:''});
+  const {line:hit,a,t}=m,vm=/-([A-Z][A-Z0-9]*)-\d+-[CF]$/.exec(hit.key);
+  if(!await shortGate([{name:labelOf(pr,a),info:stockInfo(a,t)}]))return;
+  const ev=mkEvent('Sell',pr.code,{type2:'Web order',reference:hit.order,temperature:t==='F'?'Frozen':'Chilled',variant:vm?vm[1]:''});
   hit.picked=(+hit.picked||0)+1;SV('ref',ref);
   enqueue([ev],'Order '+hit.order+' · '+labelOf(pr,a));okTone();
-  showCard('ok',packHtml(pr,a,'<div class="mut">Order '+esc(hit.order)+' · '+hit.picked+' of '+hit.qty+' picked</div>',[['Order '+hit.order,'green']]));renderPick();
+  const left=ordersList().find(x=>x.id===o.id);
+  showCard('ok',packHtml(pr,a,'<div class="mut">Order '+esc(hit.order)+' · '+hit.picked+' of '+hit.qty+' picked'+(left&&left.done?'</div><div class="big" style="color:#168a43">Order complete</div><div class="mut">':'')+'</div>',[['Order '+hit.order,'green']]));renderPick();
 }
 /* Stocktake */
 const resetCur=t=>{$('cur').className='';$('cur').textContent=t||'Pick a mode, then scan a pack label.'};
@@ -817,7 +891,8 @@ function handle(list,now){
   const auto=$('auto').value==='1',strict=$('dup').value==='strict',inView={};let todo=null;
   for(const it of list){
     inView[it.raw]=1;const pr=parseScan(it.raw),c=caps[it.raw];if(c)c.seen=now;
-    const blocked=!!c||(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial));
+    let blocked=!!c||(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial));
+    if(!blocked&&mode==='Pick'&&!pickOk(it.raw,pr))blocked=true;   // yellow: not an item still to pick (a tap can still substitute it)
     it.color=blocked?HOLD:GO;stab[it.raw]=(stab[it.raw]||0)+1;
     if(!blocked&&!todo&&stab[it.raw]>=2)todo=it;
   }
