@@ -138,7 +138,7 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
 
 <script>
 /* ============================== constants ============================== */
-const BUILD='vB0.2.8';
+const BUILD='vB0.2.10';
 const DEFAULT_URL='https://script.google.com/macros/s/AKfycbyx2IrRDLzrY4J_yH5TUdAi8QVsR4hpaZvZeYHevBeIUjIxjGNHkjU9S1_ooV4S2Yvn/exec';   // paste the Apps Script web app address (ending /exec) between the quotes and the phones need no setup for it   // keep in step with V in sw.js
 const ROLES=[
  {name:'Meat Packing',sub:'IN: put new packs into stock'},
@@ -154,7 +154,7 @@ const RETURN_FROM=['Market NFM','Market MOT','Market TAK','Shop','Special order'
 const WRITEOFF_WHY=['Damaged','Out of date','Mislabelled','Dropped','Quality','Other'];
 const ST_LOCS=['Chiller','Freezer','Shop','Market'];
 const REMOVES={Sell:1,Out:1,Writeoff:1,Offline:1,Missing:1};   // actions that can take a pack out of the online pool
-const GO='#1fb85a',HOLD='#f2c200',RED='#e03131',IDLE=60000,REARM=1500;
+const GO='#1fb85a',HOLD='#f2c200',RED='#e03131',GREY='#8a8f98',IDLE=60000,REARM=1500;
 
 /* ============================== state ============================== */
 const $=id=>document.getElementById(id);
@@ -198,13 +198,13 @@ function applyPending(){
   });
 }
 async function refresh(manual){
-  if(refBusy||!cfg.url)return;refBusy=true;const v0=mutVer;
+  if(refBusy||!cfg.url)return;refBusy=true;const v0=mutVer,t0=Date.now();
   try{
     const u=cfg.url+(cfg.url.indexOf('?')<0?'?':'&')+'token='+encodeURIComponent(cfg.token||'');
     const r=await fetch(u,{redirect:'follow'}),j=await r.json();
     if(!j.ok){lastErr=j.error==='Bad token'?'The web app refused the device token.':(j.error||'Web app error');showStatus();return}
     if(v0!==mutVer||busy)return;   // something was picked or sent while this was downloading: it would show old counts. The next refresh (after sending) replaces it.
-    ref=j;ref.fetched=nowIso();applyPending();SV('ref',ref);PM=prodMap();lastErr='';
+    ref=j;ref.fetched=nowIso();applyPending();adjReapply(t0);SV('ref',ref);PM=prodMap();lastErr='';
     if(!sticky.origin&&S().defaultOrigin)sticky.origin=S().defaultOrigin;
     renderOpts();showStatus();if(manual)setStat('Connected to web app version '+j.version+'. '+plist().length+' products.');
   }catch(e){if(manual)setStat('Could not reach the web app ('+e.message+'). Check: the address ends in /exec; the deployment\'s "Who has access" is Anyone; the phone has a connection. Test by opening the address with ?token=your-token on the end in the phone browser: it should show text starting {"ok":true.')}
@@ -252,6 +252,7 @@ async function flush(){
     lastErr='';
     const got={};(j.stored||[]).forEach(id=>got[id]=1);
     queue=queue.filter(e=>!got[e.id]);mutVer++;
+    adj.forEach(e=>{if(!e.ack&&e.ids.some(id=>got[id]))e.ack=Date.now()});SV('adj',adj);
     recent.forEach(r=>{if(r.ids.some(id=>got[id])){r.status='sent';const w=r.ids.map(id=>(j.warnings||{})[id]).filter(Boolean);if(w.length)r.warn=w.filter((x,i)=>w.indexOf(x)===i).join('; ')}});
     saveQ();renderRecent();busy=false;
     if(queue.length)flush();else refresh();
@@ -345,15 +346,23 @@ function stockInfo(a,temp){
   r.spare=r.online-r.claims;return r.found?r:null;
 }
 const short=i=>i&&i.online>0&&i.claims>0&&i.spare<=0;
-function localTake(a,temp,pool,moveOnly){   // keep the on-phone counts roughly right until the next refresh
-  const i=stockInfo(a,temp);if(!i)return;
-  const t=/^f/i.test(temp)?'F':'C',re=new RegExp('^'+a.webPlu+'(-[A-Z0-9]+)*-'+a.band+'-'+t+'$');
-  for(const x of ref.stock)if(re.test(x.key)){
-    const off=x.offline===undefined||x.offline===''?Math.max(0,(+x.inStock||0)-(+x.online||0)):(+x.offline||0);
-    if(moveOnly){if(x.online>0){x.online--;x.offline=off+1}}      // taken off the webshop, still in stock
-    else{x.inStock=Math.max(0,(+x.inStock||0)-1);if(pool==='online'){if(x.online>0)x.online--;x.offline=off}else x.offline=Math.max(0,off-1)}
-    break}
-  SV('ref',ref);
+/* Stock changes made on this phone that the web app may not have counted yet. They are re-applied on top of every data download
+   until the web app has acknowledged the events and a download taken after that has replaced them (the web app rebuilds its stock
+   before it acknowledges), or 30 minutes have passed. Undo adds the opposite change, so it shows at once as well. */
+let adj=LS('adj',[]);const ADJ_MS=30*60000;
+function stockRow(w,b,t){const re=new RegExp('^'+w+'(-[A-Z0-9]+)*-'+b+'-'+t+'$');return ref&&ref.stock&&ref.stock.find(x=>re.test(x.key))}
+function bumpRow(x,di,don,doff){
+  const i=+x.inStock||0,o=+x.online||0,f=x.offline===undefined||x.offline===''?Math.max(0,i-o):(+x.offline||0);
+  x.inStock=Math.max(0,i+di);x.online=Math.max(0,o+don);x.offline=Math.max(0,f+doff);
+}
+function adjApply(e){const x=stockRow(e.w,e.b,e.t);if(x)bumpRow(x,e.di,e.don,e.doff)}
+function adjAdd(ids,d){const e=Object.assign({ids,at:Date.now(),ack:null},d);adj.push(e);adjApply(e);SV('adj',adj);SV('ref',ref);return e}
+function adjReapply(t0){adj=adj.filter(e=>Date.now()-e.at<ADJ_MS&&!(e.ack&&e.ack<=t0));adj.forEach(adjApply);SV('adj',adj)}
+function localTake(a,temp,pool,moveOnly){   // a pack leaves stock (or, moveOnly, goes off the webshop but stays in stock)
+  if(!stockInfo(a,temp))return;
+  const t=/^f/i.test(temp)?'F':'C',last=recent[recent.length-1];
+  const d={w:a.webPlu,b:a.band,t,di:moveOnly?0:-1,don:moveOnly||pool==='online'?-1:0,doff:moveOnly?1:(pool==='online'?0:-1)};
+  adjAdd(last?last.ids:[],d);if(last)(last.adj=last.adj||[]).push(d);
 }
 function nameOfKey(key){
   const parts=String(key).split('-'),p=PM[parts[0]];
@@ -522,6 +531,8 @@ async function undo(i){
     if(l){l.picked=Math.max(0,(+l.picked||0)-r.pick.n);if(r.pick.sub){const p=String(l.subs||'').split(' | '),at=p.lastIndexOf(r.pick.sub);if(at>=0)p.splice(at,1);l.subs=p.join(' | ')}SV('ref',ref);if(mode==='Pick')renderPick()}
   }
   recent.push({ids:evs.map(e=>e.id),label:'Undo: '+r.label,mode:r.mode,time:nowIso(),status:'queued',warn:'',voided:false,noUndo:true});
+  (r.adj||[]).forEach(d=>adjAdd(evs.map(e=>e.id),{w:d.w,b:d.b,t:d.t,di:-d.di,don:-d.don,doff:-d.doff}));   // the stock comes back on this phone straight away
+  if(/Unavailable|Already scanned/.test($('cur').textContent))resetCur();   // that message no longer applies
   saveQ();renderRecent();flush();
 }
 
@@ -947,6 +958,13 @@ function renderFix(){
 const v=$('v'),o=$('o'),ctx=o.getContext('2d'),cv=document.createElement('canvas'),cx=cv.getContext('2d');
 let stream,track,running=false,det,zx,lastTick=0,lastActive=0,torchOn=false,caps={},capN=0,stab={},polys=[];
 const msg=t=>$('msg').textContent=t;
+/** Touching a red box (already scanned) does not scan it again. */
+function refuseTap(raw){
+  if(modalOpen)return;
+  const pr=parseScan(raw);
+  if(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial))return onScan(raw);   // same message as a scan: Already scanned
+  warnTone();showCard('hold','<div class="big">Already scanned</div><div class="mut">That code was already captured and is still in view, so it was not scanned again. Scan a different code first, or change the repeat rule in Settings.</div>');
+}
 function capture(raw){if(modalOpen)return;capN++;caps[raw]={seen:performance.now(),order:capN};onScan(raw)}
 async function loadZX(){
   if(window.ZXing)return;
@@ -971,23 +989,24 @@ function draw(list){
     let p=it.pts.map(([x,y])=>[x*s+dx,y*s+dy]);
     if(p.length<4){const xs=p.map(a=>a[0]),ys=p.map(a=>a[1]),a=Math.min(...xs)-14,b=Math.min(...ys)-30,c=Math.max(...xs)+14,d=Math.max(...ys)+30;p=[[a,b],[c,b],[c,d],[a,d]]}
     ctx.beginPath();p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();
-    ctx.fillStyle=it.color+'33';ctx.fill();ctx.lineWidth=6;ctx.lineJoin='round';ctx.strokeStyle=it.color;ctx.stroke();
-    polys.push({p,raw:it.raw});
+    const gr=it.color===GREY;   // already scanned: a see-through grey block, no coloured border
+    ctx.fillStyle=it.color+(gr?'99':'33');ctx.fill();ctx.lineWidth=gr?2:6;ctx.lineJoin='round';ctx.strokeStyle=it.color;ctx.stroke();
+    polys.push({p,raw:it.raw,noTap:!!it.noTap});
   }
 }
-/* Every code in view gets a box: green = can be captured, amber = already captured / already scanned this session.
+/* Every code in view gets a box: green = can be captured, yellow = not an item to pick (a tap can substitute it), grey block = already scanned, red = not available (for example reserved for a web order).
    Auto scan captures each new code once it has been steady for two frames; otherwise the user taps a box. */
 function handle(list,now){
   const auto=$('auto').value==='1',strict=$('dup').value==='strict',inView={};let todo=null;
   for(const it of list){
     inView[it.raw]=1;const pr=parseScan(it.raw),c=caps[it.raw];if(c)c.seen=now;
-    /* red = already scanned (not allowed); yellow = picking an order and this is not an item still to pick (a tap can still substitute it);
+    /* grey = already scanned (not allowed); red = not available for a validation reason; yellow = picking an order and this is not an item still to pick (a tap can still substitute it);
        green = can be captured. Picking in tap mode lets the same code be scanned again and again (identical packs). */
     const red=(!(mode==='Pick'&&!auto)&&!!c)||(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial));
     const pickMiss=mode==='Pick'&&!pickOk(it.raw,pr);
     const resv=!red&&(pickMiss?!!reservedAt(pr,'C',0):!!reservedInfo(pr));   // reserved for a web order: shown red; auto scan reports it once
     const amber=!red&&!resv&&pickMiss,blocked=red||amber||(resv&&!!c);
-    it.color=(red||resv)?RED:amber?HOLD:GO;stab[it.raw]=(stab[it.raw]||0)+1;
+    it.color=red?GREY:resv?RED:amber?HOLD:GO;it.noTap=red;/* a red box for an already scanned code cannot be captured by touch either */stab[it.raw]=(stab[it.raw]||0)+1;
     if(!blocked&&!todo&&stab[it.raw]>=2)todo=it;
   }
   Object.keys(stab).forEach(k=>{if(!inView[k])delete stab[k]});
@@ -1002,7 +1021,7 @@ $('cam').addEventListener('pointerdown',e=>{
   const r=o.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;let best=null,bd=1e9;
   polys.forEach(pl=>{const xs=pl.p.map(a=>a[0]),ys=pl.p.map(a=>a[1]),x0=Math.min(...xs)-16,x1=Math.max(...xs)+16,y0=Math.min(...ys)-16,y1=Math.max(...ys)+16;
     if(x>=x0&&x<=x1&&y>=y0&&y<=y1){const d=Math.hypot(x-(x0+x1)/2,y-(y0+y1)/2);if(d<bd){bd=d;best=pl}}});
-  if(best)capture(best.raw);
+  if(best)best.noTap?refuseTap(best.raw):capture(best.raw);
 });
 async function tick(){
   if(!running)return;const now=performance.now();
