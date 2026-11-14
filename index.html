@@ -26,6 +26,9 @@ button.sm{min-height:34px;padding:4px 10px;font-size:.85rem}
 select,input[type=text],input[type=password],input[type=number],textarea{width:100%;padding:8px 10px;border:2px solid var(--line);background:#fff;color:var(--ink)}
 label.f{display:block;font-size:.8rem;color:var(--steel);margin:6px 0 2px}
 .row{display:flex;gap:8px;margin:8px 0;flex-wrap:wrap;align-items:center}
+#s_tok{-webkit-text-security:disc;text-security:disc}
+.stepper{display:flex;flex-wrap:nowrap;gap:8px;align-items:center;margin:10px 0}.stepper button{flex:0 0 56px;font-size:1.4rem;padding:0}.stepper #mp_n{flex:1 1 auto;min-width:0;text-align:center;font-size:1.6rem;font-weight:700;user-select:none;-webkit-user-select:none;border:2px solid var(--line);border-radius:8px;background:#fff;line-height:42px;min-height:46px}
+#mbtn{flex-wrap:nowrap}#mbtn button{flex:1 1 0}
 .half{flex:1;min-width:130px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:10px;margin:8px 0}
 .seg{display:flex;gap:0;margin:0}
@@ -109,7 +112,7 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
   <div id="opts" class="card"></div>
   <div id="modearea"></div>
 
-  <div id="recentwrap"><div class="sec">Recent scans</div>
+  <div id="recentwrap"><div class="sec" id="recenthead">Recent scans</div>
   <ul class="list" id="recent"></ul></div>
 
 </section>
@@ -127,7 +130,7 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
   <label class="f" for="s_url">Web app address (Apps Script)</label>
   <input type="text" id="s_url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="https://script.google.com/macros/s/.../exec">
   <label class="f" for="s_tok">Device token</label>
-  <input type="password" id="s_tok" autocomplete="off">
+  <input type="text" id="s_tok" name="ecf-device-code" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-lpignore="true" data-1p-ignore>
   <div class="row"><button id="s_save" class="go half">Save and connect</button><button id="s_close" class="ghost half">Close</button></div>
   <div class="row"><button id="s_send" class="ghost half sm">Send queue now</button><button id="s_clear" class="ghost half sm">Clear cached data</button></div>
   <div id="s_status" class="sub" style="font-size:.85rem;color:var(--steel)"></div>
@@ -135,7 +138,7 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
 
 <script>
 /* ============================== constants ============================== */
-const BUILD='vB0.2.1';
+const BUILD='vB0.2.8';
 const DEFAULT_URL='https://script.google.com/macros/s/AKfycbyx2IrRDLzrY4J_yH5TUdAi8QVsR4hpaZvZeYHevBeIUjIxjGNHkjU9S1_ooV4S2Yvn/exec';   // paste the Apps Script web app address (ending /exec) between the quotes and the phones need no setup for it   // keep in step with V in sw.js
 const ROLES=[
  {name:'Meat Packing',sub:'IN: put new packs into stock'},
@@ -180,13 +183,28 @@ function variantOf(origin){
   ((ref&&ref.variants)||[]).forEach(v=>{if(!v.suffix)return;for(const w of v.words||[])if(w&&o.indexOf(w)>=0){hits.push(v);break}});
   return{suffix:hits.length?hits[0].suffix:'',name:hits.length?hits[0].name:'',multi:hits.length>1};
 }
+let mutVer=0;   // bumped whenever something is queued or sent; a data download that started before that is out of date
+/* Picks not yet acknowledged by the web app still count on the order lines, whatever the last download said. */
+function applyPending(){
+  const pl=(ref&&ref.pickList)||[];if(!pl.length||!queue.length)return;
+  const pickOf={};recent.forEach(r=>{if(r.pick)r.ids.forEach(id=>pickOf[id]=r)});
+  queue.forEach(e=>{
+    let r=null,sign=0;
+    if(e.type==='Sell'&&pickOf[e.id]){r=pickOf[e.id];sign=1}else if(e.type==='Void'&&e.linked&&pickOf[e.linked]){r=pickOf[e.linked];sign=-1}
+    if(!r)return;
+    const l=pl.find(x=>String(x.order)===String(r.pick.order)&&(r.pick.line?x.line===r.pick.line:x.key===r.pick.key));if(!l)return;
+    l.picked=Math.min(+l.qty||0,Math.max(0,(+l.picked||0)+sign*r.pick.n));
+    if(r.pick.sub){const p=String(l.subs||'').split(' | ').filter(Boolean);if(sign>0)p.push(r.pick.sub);else{const at=p.lastIndexOf(r.pick.sub);if(at>=0)p.splice(at,1)}l.subs=p.join(' | ')}
+  });
+}
 async function refresh(manual){
-  if(refBusy||!cfg.url)return;refBusy=true;
+  if(refBusy||!cfg.url)return;refBusy=true;const v0=mutVer;
   try{
     const u=cfg.url+(cfg.url.indexOf('?')<0?'?':'&')+'token='+encodeURIComponent(cfg.token||'');
     const r=await fetch(u,{redirect:'follow'}),j=await r.json();
     if(!j.ok){lastErr=j.error==='Bad token'?'The web app refused the device token.':(j.error||'Web app error');showStatus();return}
-    ref=j;ref.fetched=nowIso();SV('ref',ref);PM=prodMap();lastErr='';
+    if(v0!==mutVer||busy)return;   // something was picked or sent while this was downloading: it would show old counts. The next refresh (after sending) replaces it.
+    ref=j;ref.fetched=nowIso();applyPending();SV('ref',ref);PM=prodMap();lastErr='';
     if(!sticky.origin&&S().defaultOrigin)sticky.origin=S().defaultOrigin;
     renderOpts();showStatus();if(manual)setStat('Connected to web app version '+j.version+'. '+plist().length+' products.');
   }catch(e){if(manual)setStat('Could not reach the web app ('+e.message+'). Check: the address ends in /exec; the deployment\'s "Who has access" is Anyone; the phone has a connection. Test by opening the address with ?token=your-token on the end in the phone browser: it should show text starting {"ok":true.')}
@@ -219,12 +237,12 @@ function sessUnmark(ids){Object.keys(seenS).forEach(k=>Object.keys(seenS[k]).for
 function enqueue(events,label,extra){
   const ids=events.map(e=>e.id);
   events.forEach(e=>{if(e.type!=='Void'&&e.barcode){const p=parseScan(e.barcode);if(p.kind==='gs1')sessMark(p.serial,e.id)}});
-  events.forEach(e=>queue.push(e));
-  recent.push(Object.assign({ids,label,time:nowIso(),status:'queued',warn:'',voided:false},extra||{}));
+  events.forEach(e=>queue.push(e));mutVer++;
+  recent.push(Object.assign({ids,label,mode,time:nowIso(),status:'queued',warn:'',voided:false},extra||{}));
   saveQ();renderRecent();flush();
 }
 async function flush(){
-  if(busy||!queue.length||!cfg.url)return;busy=true;
+  if(busy||!queue.length||!cfg.url)return;busy=true;mutVer++;
   try{
     const batch=queue.slice(0,50);
     const c=window.AbortController?new AbortController():null,to=setTimeout(()=>c&&c.abort(),25000);
@@ -233,7 +251,7 @@ async function flush(){
     if(!j.ok){lastErr=j.error==='Bad token'?'The web app refused the device token.':(j.error||'Web app error');busy=false;showStatus();return}
     lastErr='';
     const got={};(j.stored||[]).forEach(id=>got[id]=1);
-    queue=queue.filter(e=>!got[e.id]);
+    queue=queue.filter(e=>!got[e.id]);mutVer++;
     recent.forEach(r=>{if(r.ids.some(id=>got[id])){r.status='sent';const w=r.ids.map(id=>(j.warnings||{})[id]).filter(Boolean);if(w.length)r.warn=w.filter((x,i)=>w.indexOf(x)===i).join('; ')}});
     saveQ();renderRecent();busy=false;
     if(queue.length)flush();else refresh();
@@ -322,15 +340,19 @@ function analyse(pr,temp,variant){
 function stockInfo(a,temp){
   if(!ref||!ref.stock||a.band==='')return null;
   const t=/^f/i.test(temp)?'F':'C',re=new RegExp('^'+a.webPlu+'(-[A-Z0-9]+)*-'+a.band+'-'+t+'$');
-  let r={inStock:0,online:0,claims:0,found:false};
-  ref.stock.forEach(x=>{if(re.test(x.key)){r.found=true;r.inStock+=+x.inStock||0;r.online+=+x.online||0;r.claims+=+x.claims||0}});
+  let r={inStock:0,online:0,offline:0,claims:0,found:false};
+  ref.stock.forEach(x=>{if(re.test(x.key)){r.found=true;const i=+x.inStock||0,o=+x.online||0;r.inStock+=i;r.online+=o;r.offline+=x.offline===undefined||x.offline===''?Math.max(0,i-o):(+x.offline||0);r.claims+=+x.claims||0}});
   r.spare=r.online-r.claims;return r.found?r:null;
 }
 const short=i=>i&&i.online>0&&i.claims>0&&i.spare<=0;
-function localTake(a,temp){   // keep the on-phone counts roughly right until the next refresh
+function localTake(a,temp,pool,moveOnly){   // keep the on-phone counts roughly right until the next refresh
   const i=stockInfo(a,temp);if(!i)return;
   const t=/^f/i.test(temp)?'F':'C',re=new RegExp('^'+a.webPlu+'(-[A-Z0-9]+)*-'+a.band+'-'+t+'$');
-  for(const x of ref.stock)if(re.test(x.key)){x.inStock=Math.max(0,(+x.inStock||0)-1);if(x.online>0)x.online--;break}
+  for(const x of ref.stock)if(re.test(x.key)){
+    const off=x.offline===undefined||x.offline===''?Math.max(0,(+x.inStock||0)-(+x.online||0)):(+x.offline||0);
+    if(moveOnly){if(x.online>0){x.online--;x.offline=off+1}}      // taken off the webshop, still in stock
+    else{x.inStock=Math.max(0,(+x.inStock||0)-1);if(pool==='online'){if(x.online>0)x.online--;x.offline=off}else x.offline=Math.max(0,off-1)}
+    break}
   SV('ref',ref);
 }
 function nameOfKey(key){
@@ -352,6 +374,49 @@ function dlg(title,html,btns){
 const confirmD=(title,html,yes)=>dlg(title,html,[{t:'Cancel',v:false,c:'ghost'},{t:yes||'Confirm',v:true,c:'go'}]);
 const askNum=(title,label,def)=>dlg(title,'<label class="f">'+esc(label)+'</label><input type="number" id="dn" inputmode="decimal" value="'+esc(def==null?'':def)+'">',
   [{t:'Cancel',v:null,c:'ghost'},{t:'OK',c:'go',v:()=>{const v=$('dn').value.trim();return v===''||isNaN(v)?undefined:+v}}]);
+/* Reserved for web orders. Open web order lines count against the ONLINE packs of the band only; offline packs are free to sell.
+   A pack with its own serial (new labels) is known to be online or not, so only an online pack can be reserved. An old label
+   has no identity, so the pack taken is the first available in the order set by "Take stock from first" (offline first by default):
+   it is reserved only when no offline pack is left and the online packs are all spoken for. */
+const BLOCK_MODES={Sell:1,Out:1,'Build box':1};
+const onlineSet=()=>{if(!ref||!ref.onlineSerials)return null;if(ref._os!==ref.onlineSerials){ref._os=ref.onlineSerials;ref._osSet=new Set(ref.onlineSerials)}return ref._osSet};
+const hasSerial=pr=>pr&&pr.kind==='gs1'&&!!pr.serial&&!!onlineSet();
+/** ex = other packs of this band already taken in this sale or box: {ser: online serial packs, band: packs without a serial} */
+function poolOf(pr,info){   // which pool a scanned pack comes out of
+  if(hasSerial(pr))return onlineSet().has(pr.serial)?'online':'offline';
+  const first=(ref&&ref.settings&&ref.settings.takeFirst)==='online'?'online':'offline';
+  return first==='online'?(info.online>0?'online':'offline'):(info.offline>0?'offline':'online');
+}
+function reservedAt(pr,temp,ex){
+  if(!ref||!ref.stock||!pr||pr.err||pr.kind==='box'||(pr.kind!=='ean13'&&pr.kind!=='gs1'))return null;
+  const a=analyse(pr,temp,''),info=stockInfo(a,temp);ex=ex||{ser:0,band:0};
+  if(!info||!(info.claims>0))return null;
+  let blocked;
+  if(hasSerial(pr))blocked=onlineSet().has(pr.serial)&&(info.online-info.claims-ex.ser)<=0;
+  else if(ref.settings&&ref.settings.takeFirst==='online')blocked=(info.online-info.claims-ex.band)<=0;
+  else blocked=(info.offline-ex.band)<=0&&(info.online-info.claims-Math.max(0,ex.band-info.offline))<=0;
+  return blocked?{a,info,temp}:null;
+}
+function reservedInfo(pr){   // for the modes that take a pack out of stock
+  if(!BLOCK_MODES[mode]||!pr||pr.err||pr.kind==='box')return null;
+  const temp=mode==='Build box'?sticky.temp:(tempFor(pr,mode)||'Chilled');
+  const a=analyse(pr,temp,''),ex={ser:0,band:0};
+  const items=mode==='Sell'?basket.filter(x=>!x.box&&x.a.key===a.key&&(x.temp||'Chilled')===temp).map(x=>x.pr):(mode==='Build box'&&boxB?boxB.packs.filter(p=>p.key===a.key).map(p=>p.pr):[]);
+  items.forEach(p=>{if(hasSerial(p)){if(onlineSet().has(p.serial))ex.ser++}else ex.band++});
+  return reservedAt(pr,temp,ex);
+}
+let ovrNow=false;   // true while an override that the user confirmed is being carried out
+const ovrNote=on=>on?'OVERRIDE: reserved for a web order':'';
+const withOvr=(n,on)=>[n,ovrNote(on)].filter(String).join(' · ');
+function reservedBlock(pr,r,raw){
+  badTone();
+  const online=poolOf(pr,r.info)==='online';
+  showCard('bad','<div class="big">Unavailable</div><div class="mut">'+esc(labelOf(pr,r.a))+' is reserved for a web order. '+r.info.online+' online, '+r.info.claims+' needed for open web orders, none available'+(r.info.offline>0?' ('+r.info.offline+' offline in this band)':'')+'. Nothing was saved.</div><button class="sm warn" id="ovrbtn">Override…</button>');
+  $('ovrbtn').onclick=async()=>{
+    if(!await confirmD('Override the reservation?','<p><b>'+esc(labelOf(pr,r.a))+'</b> is reserved for an open web order. Taking it leaves that order short of '+(r.info.claims-r.info.online+1>0?'a pack':'stock')+'.</p><p>Continue logs the scan with an OVERRIDE note and puts it on the daily exceptions list.</p>','Override and take it'))return;
+    ovrNow=true;try{await onScan(raw,pr)}finally{ovrNow=false}
+  };
+}
 async function shortGate(list){   // list of {name,info}; returns true to go ahead
   const bad=list.filter(x=>short(x.info));if(!bad.length)return true;
   warnTone();
@@ -360,7 +425,7 @@ async function shortGate(list){   // list of {name,info}; returns true to go ahe
 
 /* ============================== events ============================== */
 function mkEvent(type,barcode,o){
-  return Object.assign({id:newId(),time:nowIso(),barcode:barcode||'',type,type2:'',salePrice:'',note:$('note').value.trim(),temperature:'',online:'',location:'',reference:'',
+  return Object.assign({id:newId(),time:nowIso(),barcode:barcode||'',type,type2:'',salePrice:'',note:withOvr($('note').value.trim(),ovrNow),temperature:'',online:'',location:'',reference:'',
     animalCode:'',farmOrigin:'',variant:'',role,device:cfg.device,build:BUILD,qty:1},o||{});
 }
 const tempFor=(pr,m)=>(pr.kind==='gs1'&&m!=='IN')?'':sticky.temp;
@@ -377,7 +442,7 @@ function bindSeg(id,fn){const b=$(id);if(!b)return;b.onclick=e=>{const t=e.targe
 function sel(id,opts,val){return'<select id="'+id+'">'+opts.map(o=>'<option'+(o===val?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>'}
 const TEMP_SEG=()=>'<label class="f">Temperature of the pack'+(mode==='IN'?'':' (new labels know it; old labels do not)')+'</label>'+seg('o_temp',[{v:'Chilled',t:'Chilled'},{v:'Frozen',t:'Frozen'}],sticky.temp);
 function renderOpts(){
-  $('recentwrap').hidden=(mode==='Stocktake');
+  $('recentwrap').hidden=(mode==='Stocktake');renderRecent();
   const o=$('opts');if(!mode){o.hidden=true;return}o.hidden=false;let h='',after=[];
   const refRow='<label class="f" for="o_ref">Reference (retailer name, invoice or order)</label><input type="text" id="o_ref" value="'+esc(sticky.ref)+'">';
   if(mode==='IN'){
@@ -438,23 +503,25 @@ function showRoles(){
 }
 
 /* ============================== recent scans and undo ============================== */
+const actName=m=>m==='IN'?'Meat Packing':m;
 function renderRecent(){
   const u=$('recent');if(!u)return;
-  const list=recent.slice(-8).reverse();
-  u.innerHTML=list.map((r,i)=>'<li><div class="line"><div><b>'+esc(r.label)+'</b><div class="sub">'+hhmm(r.time)+' · '+(r.voided?'cancelled':(r.status==='sent'?'sent':'waiting to send'))+'</div>'+(r.warn?'<div class="w">⚠ '+esc(r.warn)+'</div>':'')+'</div>'+
-    (r.voided||r.noUndo?'':'<button class="sm ghost" data-u="'+(recent.length-1-i)+'">Undo</button>')+'</div></li>').join('')||'<li class="sub">Nothing yet.</li>';
+  const h=$('recenthead');if(h)h.textContent='Recent '+(mode?actName(mode)+' ':'')+'scans';
+  const list=[];for(let i=recent.length-1;i>=0&&list.length<8;i--)if(recent[i].mode===mode)list.push([recent[i],i]);   // only this activity's scans
+  u.innerHTML=list.map(([r,idx])=>'<li><div class="line"><div><b>'+esc(r.label)+'</b><div class="sub">'+hhmm(r.time)+' · '+(r.voided?'cancelled':(r.status==='sent'?'sent':'waiting to send'))+'</div>'+(r.warn?'<div class="w">⚠ '+esc(r.warn)+'</div>':'')+'</div>'+
+    (r.voided||r.noUndo?'':'<button class="sm ghost" data-u="'+idx+'">Undo</button>')+'</div></li>').join('')||'<li class="sub">Nothing yet.</li>';
   Array.prototype.forEach.call(u.querySelectorAll('button[data-u]'),b=>b.onclick=()=>undo(+b.dataset.u));
 }
 async function undo(i){
   const r=recent[i];if(!r||r.voided)return;
   if(!await confirmD('Undo this scan?','<p>'+esc(r.label)+'</p><p>A cancelling entry is added. The original stays in the log.</p>','Undo'))return;
   const evs=r.ids.map(id=>mkEvent('Void','',{linked:id,note:'Undo: '+r.label}));
-  r.voided=true;sessUnmark(r.ids);evs.forEach(e=>queue.push(e));
+  r.voided=true;sessUnmark(r.ids);evs.forEach(e=>queue.push(e));mutVer++;
   if(r.pick){   // take the pick (or substitution) back off the order line
     const l=((ref&&ref.pickList)||[]).find(x=>String(x.order)===String(r.pick.order)&&(r.pick.line?x.line===r.pick.line:x.key===r.pick.key));
     if(l){l.picked=Math.max(0,(+l.picked||0)-r.pick.n);if(r.pick.sub){const p=String(l.subs||'').split(' | '),at=p.lastIndexOf(r.pick.sub);if(at>=0)p.splice(at,1);l.subs=p.join(' | ')}SV('ref',ref);if(mode==='Pick')renderPick()}
   }
-  recent.push({ids:evs.map(e=>e.id),label:'Undo: '+r.label,time:nowIso(),status:'queued',warn:'',voided:false,noUndo:true});
+  recent.push({ids:evs.map(e=>e.id),label:'Undo: '+r.label,mode:r.mode,time:nowIso(),status:'queued',warn:'',voided:false,noUndo:true});
   saveQ();renderRecent();flush();
 }
 
@@ -462,7 +529,7 @@ async function undo(i){
 function showCard(cls,html){const c=$('cur');c.className=cls;c.innerHTML=html}
 function stockLine(a,temp){
   const i=stockInfo(a,temp);if(!i)return'';
-  return'<div class="mut">'+esc(a.key||'')+' · online '+i.online+' · open orders '+i.claims+' · spare '+i.spare+'</div>';
+  return'<div class="mut">'+esc(a.key||'')+' · online '+i.online+' · open orders '+i.claims+' · spare online '+(i.online-i.claims)+' · offline '+i.offline+'</div>';
 }
 function packHtml(pr,a,extra,tags){
   const t=(tags||[]).map(x=>'<span class="tag '+(x[1]||'')+'">'+esc(x[0])+'</span>').join('');
@@ -494,6 +561,7 @@ async function onScan(raw,pre){
   if(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial)){
     warnTone();const a0=analyse(pr,sticky.temp,'');showCard('hold','<div class="big">Already scanned</div><div class="mut">'+esc(labelOf(pr,a0))+' was already scanned in this '+(mode==='Stocktake'?'stocktake':'session')+', so it was not counted again. If that earlier scan was a mistake, use Undo in Recent scans.</div>');return;
   }
+  const rsv=ovrNow?null:reservedInfo(pr);if(rsv)return reservedBlock(pr,rsv,raw);
   try{
     if(mode==='IN')return await doIn(pr);
     if(mode==='Pick')return await doPick(pr);
@@ -533,14 +601,14 @@ async function doSimple(pr){
   const type=SIMPLE[mode],f=simpleFields();
   if(pr.kind==='box')return await doBoxAction(pr,type,f);
   const temp=tempFor(pr,mode),a=analyse(pr,temp||'Chilled',''),info=stockInfo(a,temp||'Chilled'),warn=[];
-  if(REMOVES[type]&&!await shortGate([{name:labelOf(pr,a),info}]))return showCard('hold','Cancelled. Nothing was saved.');
+  if(REMOVES[type]&&type!=='Out'&&!await shortGate([{name:labelOf(pr,a),info}]))return showCard('hold','Cancelled. Nothing was saved.');
   const ev=mkEvent(type,pr.code,Object.assign({temperature:type==='Freeze'?'Frozen':(type==='Thaw'?'Chilled':temp)},f));
   const tags=[[mode+(f.type2?': '+f.type2:''),'green']];
   if(temp)tags.push([temp,'']);
   a.flags.forEach(x=>{tags.push([x,'amber']);warn.push(x)});
   if(dupCheck(pr,a,type)){tags.push(['Possible double scan','amber']);warn.push('double')}
   enqueue([ev],mode+(f.type2?' ('+f.type2+')':'')+' '+labelOf(pr,a));
-  if(REMOVES[type])localTake(a,temp||'Chilled');
+  if(REMOVES[type])localTake(a,temp||'Chilled',poolOf(pr,info||stockInfo(a,temp||'Chilled')||{online:0,offline:0}),type==='Offline');
   warn.length?warnTone():okTone();
   showCard(warn.length?'hold':'ok',packHtml(pr,a,stockLine(a,temp||'Chilled'),tags)+(warn.indexOf('double')>=0?'<button class="sm warn" id="undonow">Undo this scan</button>':''));
   if($('undonow'))$('undonow').onclick=()=>undo(recent.length-1);
@@ -604,7 +672,7 @@ function doBoxScan(pr){
   if(boxB.awaiting)return doBoxLabel(pr);
   if(boxB.packs.some(p=>p.code===pr.code&&pr.kind==='gs1'))return scanBad(pr.raw,'That pack is already in this box.');
   const a=analyse(pr,sticky.temp,'');
-  boxB.packs.push({code:pr.code,pr,label:labelOf(pr,a),key:a.key,src:sticky.temp});okTone();
+  boxB.packs.push({code:pr.code,pr,label:labelOf(pr,a),key:a.key,src:sticky.temp,ovr:ovrNow});okTone();
   showCard('ok',packHtml(pr,a,'',[['In the box','green']]));renderBox();
 }
 async function doBoxLabel(pr){
@@ -620,7 +688,7 @@ async function doBoxLabel(pr){
   if(!await confirmD('Finish this box?','<p>Label <b>'+esc(bn(code))+'</b><br>'+b.packs.length+' packs go into this '+esc(b.type)+' box ('+esc(b.temp)+')'+(b.packs.some(p=>p.src!==b.temp)?'. Packs at the other temperature are '+(b.temp==='Frozen'?'frozen':'thawed')+' as they go in':'')+'.</p>','Finish box'))return;
   const evs=[],tc=b.temp==='Frozen'?'Freeze':'Thaw';
   b.packs.forEach(p=>{if(p.src!==b.temp)evs.push(mkEvent(tc,p.code,{temperature:b.temp}))});
-  b.packs.forEach(p=>evs.push(mkEvent('Box',p.code,{reference:boxRef(b),note:b.type,temperature:b.temp})));
+  b.packs.forEach(p=>evs.push(mkEvent('Box',p.code,{reference:boxRef(b),note:withOvr(b.type,p.ovr),temperature:b.temp})));
   enqueue(evs,'Box '+id+' ('+b.packs.length+' packs)');
   const lb=LS('localBoxes',[]);lb.push({id,type:b.type,temp:b.temp,price:b.price,location:'Offline',packs:b.packs.map(p=>({barcode:p.code,key:p.key.replace(/-[CF]$/,b.temp==='Frozen'?'-F':'-C'),name:p.label}))});SV('localBoxes',lb.slice(-50));
   doneBox=b;boxB=null;okTone();renderBox();
@@ -655,7 +723,7 @@ function doBasket(pr){
   }
   const temp=tempFor(pr,mode),a=analyse(pr,temp||'Chilled',''),info=stockInfo(a,temp||'Chilled'),warn=[];
   if(pr.kind==='gs1'&&basket.some(x=>x.pr.code===pr.code))return scanBad(pr.code,'That pack is already in the sale.');
-  basket.push({pr,a,temp,sell:pr.price===''?'':Number(pr.price).toFixed(2)});bsel=basket.length-1;
+  basket.push({pr,a,temp,ovr:ovrNow,sell:pr.price===''?'':Number(pr.price).toFixed(2)});bsel=basket.length-1;
   const tags=[[temp||'by label','']];a.flags.forEach(x=>{tags.push([x,'amber']);warn.push(x)});
   if(dupCheck(pr,a,'Sell')){tags.push(['Possible double scan','amber']);warn.push('d')}
   warn.length?warnTone():okTone();
@@ -676,18 +744,15 @@ async function saveSale(){
   if(!basket.length)return dlg('Nothing to save','<p>Scan some items first.</p>');
   const stype=($('o_stype')||{}).value||sticky.stype,ref0=($('o_ref')?$('o_ref').value:sticky.ref).trim();
   if(basket.some(x=>x.box&&x.sell===''))return dlg('Box price needed','<p>Set a price for each box (Change price).</p>');
-  const need={};basket.forEach(x=>{if(x.box)return;const k=x.a.key+'|'+x.temp;(need[k]=need[k]||{n:0,a:x.a,t:x.temp,name:labelOf(x.pr,x.a)}).n++});
-  const gate=Object.keys(need).map(k=>{const i=stockInfo(need[k].a,need[k].t||'Chilled');return{name:need[k].name,info:i&&Object.assign({},i,{spare:i.spare-need[k].n+1})}});
   const tot=basket.reduce((a,x)=>a+(+x.sell||0),0);
   if(!await confirmD('Save this sale?','<p>'+basket.length+' items · $'+tot.toFixed(2)+'<br>'+esc(stype)+(ref0?' · '+esc(ref0):'')+'</p>','Save sale'))return;
-  if(!await shortGate(gate))return;
   const evs=[];
   basket.forEach(x=>{
     if(x.box)x.box.packs.forEach((p,i)=>evs.push(mkEvent('Sell',p.barcode,{type2:stype,salePrice:i===0?x.sell:'',reference:boxRef(x.box),temperature:x.box.temp})));
-    else evs.push(mkEvent('Sell',x.pr.code,{type2:stype,salePrice:x.sell,reference:ref0,temperature:x.temp}));
+    else evs.push(mkEvent('Sell',x.pr.code,{type2:stype,salePrice:x.sell,reference:ref0,temperature:x.temp,note:withOvr($('note').value.trim(),x.ovr)}));
   });
   enqueue(evs,'Sale: '+basket.length+' items · $'+tot.toFixed(2)+' · '+stype);
-  basket.forEach(x=>{if(!x.box)localTake(x.a,x.temp||'Chilled')});
+  basket.forEach(x=>{if(!x.box)localTake(x.a,x.temp||'Chilled',poolOf(x.pr,stockInfo(x.a,x.temp||'Chilled')||{online:0,offline:0}))});
   basket=[];bsel=-1;$('note').value='';renderBasket();okTone();showCard('ok','<div class="big">Sale saved</div><div class="mut">'+evs.length+' scans</div>');
 }
 /* Pick list */
@@ -715,7 +780,8 @@ function weightRange(l){
 function ordersList(){
   const by={};
   ((ref&&ref.pickList)||[]).forEach(l=>{
-    const o=by[l.order]=by[l.order]||{id:String(l.order),customer:'',created:'',lines:[]};
+    const o=by[l.order]=by[l.order]||{id:String(l.order),customer:'',created:'',delivery:'',lines:[]};
+    if(!o.delivery&&l.delivery)o.delivery=String(l.delivery);
     if(!o.customer&&l.customer)o.customer=String(l.customer);
     if(l.created&&(!o.created||String(l.created)<o.created))o.created=String(l.created);
     o.lines.push(l);
@@ -745,35 +811,39 @@ function renderPick(){
   if(pickOrd&&!o)pickOrd=null;
   if(!o){
     if(!all.length){d.innerHTML='<div class="sub">No open orders in the data on this phone'+(ref&&ref.fetched?' (data from '+hhmm(ref.fetched)+')':'')+'.</div>';return}
-    d.innerHTML='<div class="sec" style="margin-top:0">Open web orders, oldest first</div>'+all.map(x=>
-      '<div class="card ord" data-o="'+esc(x.id)+'" role="button" tabindex="0" style="margin:6px 0;cursor:pointer;border-left:10px solid '+(x.done?'var(--go,#1fb85a)':'#d64545')+'"><div class="line"><b>'+orderTitle(x)+'</b><span>'+x.p+' / '+x.q+'</span></div>'+
+    const card=x=>'<div class="card ord" data-o="'+esc(x.id)+'" role="button" tabindex="0" style="margin:6px 0;cursor:pointer;border-left:10px solid '+(x.done?'var(--go,#1fb85a)':'#d64545')+'"><div class="line"><b>'+orderTitle(x)+'</b><span>'+x.p+' / '+x.q+'</span></div>'+
       '<div class="mut" style="font-size:.8rem;color:var(--steel)">'+(x.created?esc(new Date(x.created).toLocaleString([],{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}))+' · ':'')+x.lines.length+' line'+(x.lines.length>1?'s':'')+(x.done?' · <b style="color:#168a43">Picked, complete</b>':' · still to pick')+'</div>'+
-      '<div class="prog"><i style="width:'+(x.q?x.p/x.q*100:0)+'%"></i></div></div>').join('');
+      '<div class="prog"><i style="width:'+(x.q?x.p/x.q*100:0)+'%"></i></div></div>';
+    /* grouped by the WooCommerce delivery method; the group with the oldest waiting order is first, oldest first inside each group */
+    const groups=[];all.forEach(x=>{const m=x.delivery||'No delivery method';let g=groups.find(y=>y.m===m);if(!g)groups.push(g={m,os:[]});g.os.push(x)});
+    d.innerHTML=groups.map((g,i)=>{const left=g.os.filter(x=>!x.done).length;
+      return'<div class="sec" style="margin:'+(i?'14':'0')+'px 0 0">'+esc(g.m)+' <span style="font-weight:400;text-transform:none;letter-spacing:0">· '+g.os.length+' order'+(g.os.length>1?'s':'')+(left?', '+left+' to pick':', all picked')+'</span></div>'+g.os.map(card).join('')}).join('');
     d.querySelectorAll('.ord').forEach(e=>{e.onclick=()=>openOrder(e.dataset.o);e.onkeydown=ev=>{if(ev.key==='Enter')openOrder(e.dataset.o)}});
     return;
   }
   const groups=['Chilled','Frozen','Ambient'].map(g=>({g,ls:o.lines.filter(l=>lineInfo(l).grp===g)})).filter(x=>x.ls.length);
   d.innerHTML='<div class="row" style="margin:0 0 6px"><button id="po_back" class="ghost sm">← All orders</button></div>'+
     '<div class="card" style="border:4px solid '+(o.done?'#1fb85a':'#d64545')+'"><div class="line"><b style="font-size:1.1rem">'+orderTitle(o)+'</b><span>'+o.p+' / '+o.q+'</span></div>'+
-    '<div class="mut" style="font-size:.85rem;margin:2px 0 6px;color:'+(o.done?'#168a43':'#b03030')+'">'+(o.done?'All items picked. Set the order to Complete in WooCommerce (not done by this app).':'Still to pick: '+(o.q-o.p)+' item'+(o.q-o.p>1?'s':''))+'</div>'+
+    (o.delivery?'<div class="mut" style="font-size:.85rem;color:var(--steel)">'+esc(o.delivery)+'</div>':'')+'<div class="mut" style="font-size:.85rem;margin:2px 0 6px;color:'+(o.done?'#168a43':'#b03030')+'">'+(o.done?'All items picked. Set the order to Complete in WooCommerce (not done by this app).':'Still to pick: '+(o.q-o.p)+' item'+(o.q-o.p>1?'s':''))+'</div>'+
     groups.map(x=>'<div class="sec" style="margin:10px 0 2px">'+x.g+'</div>'+x.ls.map(l=>{
       const q=+l.qty||0,p=Math.min(q,+l.picked||0),full=p>=q,subs=String(l.subs||'').split(' | ').filter(Boolean);
-      return'<div class="card pl" data-l="'+o.lines.indexOf(l)+'" style="margin:4px 0;cursor:pointer;background:'+(full?'#eef9f1':'#fff')+'"><div class="line"><b>'+esc(l.product||nameOfKey(l.key))+'</b><span>'+(q>1?p+' / '+q:(full?'Picked ✓':'To pick'))+'</span></div>'+
+      return'<div class="card pl" data-l="'+o.lines.indexOf(l)+'" style="margin:4px 0;cursor:pointer;background:'+(full?'#eef9f1':'#fff')+'"><div class="line"><b>'+esc(l.product||nameOfKey(l.key))+'</b><span>'+p+' / '+q+'</span></div>'+
         '<div class="mut" style="font-size:.8rem;color:var(--steel)">Acceptable weight: '+esc(weightRange(l))+'</div>'+
-        (q>1?'<div class="prog"><i style="width:'+(q?p/q*100:0)+'%"></i></div>':'')+
+        '<div class="prog"><i style="width:'+(q?p/q*100:0)+'%"></i></div>'+
         subs.map(sb=>'<div style="color:#c0392b;font-size:.82rem;margin-top:3px">Substituted: '+esc(sb)+'</div>').join('')+'</div>'}).join('')).join('')+'</div>';
   d.querySelectorAll('.pl').forEach(e=>{e.onclick=()=>manualPick(o,o.lines[+e.dataset.l])});
   $('po_back').onclick=()=>{pickOrd=null;renderPick();resetCur('Touch an order to start picking, or scan the barcode on its packing slip.')};
 }
-function stepMp(d){const e=$('mp_n');e.value=Math.min(+e.max,Math.max(1,(Math.floor(+e.value)||1)+d))}
+function stepMp(d){const e=$('mp_n'),v=Math.min(+e.dataset.max,Math.max(1,(+e.dataset.v||1)+d));e.dataset.v=v;e.textContent=v}
 /* Mark items picked by hand: no barcode, pack not here to scan, or label missing or damaged. Logged as a web order sale of that stock key. */
 async function manualPick(o,line){
   const q=+line.qty||0,rem=q-(+line.picked||0),name=line.product||nameOfKey(line.key);
   if(rem<=0)return;
-  const n=await dlg('Mark as picked','<p><b>'+esc(name)+'</b><br>'+(+line.picked||0)+' of '+q+' picked so far.</p><div class="row" style="align-items:center"><button type="button" class="ghost" onclick="stepMp(-1)">−</button>'+
-    '<input type="number" id="mp_n" inputmode="numeric" min="1" max="'+rem+'" value="'+rem+'" style="text-align:center"><button type="button" class="ghost" onclick="stepMp(1)">+</button></div>'+
+  const n=await dlg('Mark as picked','<p><b>'+esc(name)+'</b><br>'+(+line.picked||0)+' of '+q+' picked so far.</p><div class="stepper"><button type="button" class="ghost" onclick="stepMp(-1)" aria-label="One less">−</button>'+
+    '<div id="mp_n" role="status" aria-label="Number picked" data-max="'+rem+'" data-v="'+rem+'">'+rem+'</div>'+
+    '<button type="button" class="ghost" onclick="stepMp(1)" aria-label="One more">+</button></div>'+
     '<p style="color:var(--steel);font-size:.85rem">How many to mark as picked (up to '+rem+')? Use this for items with no barcode, or when the pack is not here to scan or its label is missing or damaged. Stock is taken off this product.</p>',
-    [{t:'Cancel',v:false,c:'ghost'},{t:'Mark picked',v:()=>{const x=Math.floor(+$('mp_n').value);return x>=1&&x<=rem?x:undefined},c:'go'}]);
+    [{t:'Cancel',v:false,c:'ghost'},{t:'Mark picked',v:()=>{const x=+$('mp_n').dataset.v;return x>=1&&x<=rem?x:undefined},c:'go'}]);
   if(!n)return;
   const t=lineInfo(line).t,ev=mkEvent('Sell','',{type2:'Web order',reference:o.id,stockKey:line.key,qty:n,temperature:t==='F'?'Frozen':'Chilled',note:'MANUAL: marked picked by hand'});
   line.picked=(+line.picked||0)+n;SV('ref',ref);
@@ -786,6 +856,7 @@ async function doPick(pr){
   if(!o){warnTone();return showCard('hold','<div class="big">Open an order first</div><div class="mut">Touch an order in the list, or scan the barcode on its packing slip, then scan the packs for it.</div>')}
   const m=pickMatch(pr,o);
   if(!m){
+    const rv=ovrNow?null:reservedAt(pr,'C',null);if(rv)return reservedBlock(pr,rv,pr.raw);
     warnTone();const a=analyse(pr,'C','');
     const open=o.lines.filter(l=>(+l.qty||0)>(+l.picked||0));
     showCard('hold',packHtml(pr,a,'<div class="mut">Not an item still to pick on '+esc(o.id)+'.</div>',[['Not on this order','amber']]));
@@ -793,7 +864,6 @@ async function doPick(pr){
     const line=await dlg('Substitute this pack?','<p><b>'+esc(labelOf(pr,a))+'</b> is not an item still to pick on this order. Which item is it replacing?</p>',
       open.map(l=>({t:(l.product||nameOfKey(l.key))+' ('+(+l.picked||0)+' / '+l.qty+')',v:l,c:'ghost'})).concat([{t:'Cancel, do not use it',v:null,c:'ghost'}]));
     if(!line)return;
-    if(!await shortGate([{name:labelOf(pr,a),info:stockInfo(a,'C')}]))return;
     const vs=/-([A-Z][A-Z0-9]*)-\d+-[CF]$/.exec(a.key||''),what=labelOf(pr,a);
     const ev=mkEvent('Sell',pr.code,{type2:'Web order',reference:o.id,temperature:tempFor(pr,mode),variant:vs?vs[1]:'',note:'SUB['+(line.line||'')+'] '+what});
     line.picked=(+line.picked||0)+1;line.subs=(line.subs?line.subs+' | ':'')+what;SV('ref',ref);
@@ -801,7 +871,6 @@ async function doPick(pr){
     showCard('ok',packHtml(pr,a,'<div style="color:#c0392b">Substituted for '+esc(line.product||nameOfKey(line.key))+'</div><div class="mut">'+esc(o.id)+'</div>',[[o.id,'green']]));renderPick();return;
   }
   const {line:hit,a,t}=m,vm=/-([A-Z][A-Z0-9]*)-\d+-[CF]$/.exec(hit.key);
-  if(!await shortGate([{name:labelOf(pr,a),info:stockInfo(a,t)}]))return;
   const ev=mkEvent('Sell',pr.code,{type2:'Web order',reference:hit.order,temperature:t==='F'?'Frozen':'Chilled',variant:vm?vm[1]:''});
   hit.picked=(+hit.picked||0)+1;SV('ref',ref);
   enqueue([ev],hit.order+' · '+labelOf(pr,a),{pick:{order:hit.order,line:hit.line,key:hit.key,n:1,sub:''}});okTone();
@@ -915,8 +984,10 @@ function handle(list,now){
     /* red = already scanned (not allowed); yellow = picking an order and this is not an item still to pick (a tap can still substitute it);
        green = can be captured. Picking in tap mode lets the same code be scanned again and again (identical packs). */
     const red=(!(mode==='Pick'&&!auto)&&!!c)||(pr.kind==='gs1'&&sessOn()&&sessSeen(pr.serial));
-    const amber=!red&&mode==='Pick'&&!pickOk(it.raw,pr),blocked=red||amber;
-    it.color=red?RED:amber?HOLD:GO;stab[it.raw]=(stab[it.raw]||0)+1;
+    const pickMiss=mode==='Pick'&&!pickOk(it.raw,pr);
+    const resv=!red&&(pickMiss?!!reservedAt(pr,'C',0):!!reservedInfo(pr));   // reserved for a web order: shown red; auto scan reports it once
+    const amber=!red&&!resv&&pickMiss,blocked=red||amber||(resv&&!!c);
+    it.color=(red||resv)?RED:amber?HOLD:GO;stab[it.raw]=(stab[it.raw]||0)+1;
     if(!blocked&&!todo&&stab[it.raw]>=2)todo=it;
   }
   Object.keys(stab).forEach(k=>{if(!inView[k])delete stab[k]});
