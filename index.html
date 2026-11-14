@@ -41,7 +41,10 @@ label.f{display:block;font-size:.8rem;color:var(--steel);margin:6px 0 2px}
 #cam{position:relative;background:#101719;border-radius:10px;overflow:hidden;height:0;padding-top:70%}
 #cam video,#cam canvas{position:absolute;top:0;left:0;width:100%;height:100%;object-fit:cover}
 #msg{position:absolute;left:0;right:0;bottom:0;padding:6px 12px;background:rgba(16,23,25,.72);color:#fff;font-size:.85rem}
-#camwrap{position:sticky;top:0;z-index:5;background:var(--chalk);padding:2px 0 6px}
+#scanbar{position:sticky;top:0;z-index:5;background:var(--chalk);padding:2px 0 6px}
+#cam.off #msg{top:0;display:flex;align-items:center;justify-content:center;text-align:center;font-size:1rem;background:transparent;padding:0 20px}
+#cam.off{cursor:pointer}
+#torch{position:absolute;top:8px;right:8px;z-index:2;min-height:34px;padding:4px 12px;background:rgba(16,23,25,.7);font-size:.85rem}
 #cam{padding-top:56%}#cam canvas{touch-action:manipulation}
 #cur{background:#fff;border:2px solid var(--line);border-radius:10px;padding:10px;min-height:70px}
 #cur.ok{border-color:var(--go)}#cur.hold{border-color:var(--hold);background:#fff8e8}#cur.bad{border-color:var(--bad);background:#fdeceb}
@@ -89,26 +92,25 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
 <section id="work" hidden>
   <div class="modes" id="modes"></div>
 
-  <div id="camwrap" class="camonly">
-    <div id="cam"><video id="v" playsinline muted></video><canvas id="o"></canvas><div id="msg">Camera is off</div></div>
-    <div class="row" style="margin:6px 0 0"><button id="power" style="flex:1">Enable camera</button><button id="torch" hidden>Torch</button></div>
+  <div id="scanbar">
+    <div id="cam" class="camonly off"><video id="v" playsinline muted></video><canvas id="o"></canvas><button id="torch" type="button" hidden>Torch</button><div id="msg">Camera is off · touch to activate</div></div>
+    <div class="seg" id="inbar" style="margin-top:6px"><button type="button" id="b_cam">Camera</button><button type="button" id="b_bt">Handheld</button><button type="button" id="b_set">Settings</button></div>
+  </div>
+  <div id="setpanel" class="card" hidden>
+    <div class="row camonly" style="margin-top:0">
+      <select id="auto" class="half" aria-label="Scan mode"><option value="1">Auto scan</option><option value="0" selected>Tap to capture</option></select>
+      <select id="dup" class="half" aria-label="Repeat rule"><option value="rearm">Repeat after code leaves frame</option><option value="strict" selected>No repeat until new code</option></select>
+    </div>
+    <div class="row" style="margin-bottom:0"><input type="text" id="note" placeholder="Note (people only, saved with each scan)" aria-label="Note"></div>
   </div>
   <div id="btui" hidden><label for="scan" style="font-size:.85rem;color:var(--steel)">Handheld scanner: pull the trigger to scan</label><input type="text" id="scan" inputmode="none" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Waiting for scanner…"><div id="dbg" style="font-size:.75rem;color:var(--steel)">Scanner readout: waiting for a key</div></div>
   <div id="cur">Pick a mode, then scan a pack label.</div>
   <div id="opts" class="card"></div>
   <div id="modearea"></div>
 
-  <div class="sec">Recent scans</div>
-  <ul class="list" id="recent"></ul>
+  <div id="recentwrap"><div class="sec">Recent scans</div>
+  <ul class="list" id="recent"></ul></div>
 
-  <div class="card" id="scanset">
-    <div class="row" style="margin-top:0"><select id="src" aria-label="Input source"><option value="cam">Input: phone camera</option><option value="bt">Input: handheld Bluetooth scanner</option></select></div>
-    <div class="row camonly">
-      <select id="auto" class="half" aria-label="Scan mode"><option value="1">Auto scan</option><option value="0" selected>Tap to capture</option></select>
-      <select id="dup" class="half" aria-label="Repeat rule"><option value="rearm">Repeat after code leaves frame</option><option value="strict" selected>No repeat until new code</option></select>
-    </div>
-    <div class="row" style="margin-bottom:0"><input type="text" id="note" placeholder="Note (people only, saved with each scan)" aria-label="Note"></div>
-  </div>
 </section>
 
 <p id="info"></p>
@@ -132,7 +134,7 @@ ul.list li .w{color:#b26a00;font-size:.8rem}
 
 <script>
 /* ============================== constants ============================== */
-const BUILD='vB0.1.5';
+const BUILD='vB0.1.7';
 const DEFAULT_URL='https://script.google.com/macros/s/AKfycbyx2IrRDLzrY4J_yH5TUdAi8QVsR4hpaZvZeYHevBeIUjIxjGNHkjU9S1_ooV4S2Yvn/exec';   // paste the Apps Script web app address (ending /exec) between the quotes and the phones need no setup for it   // keep in step with V in sw.js
 const ROLES=[
  {name:'Meat Packing',sub:'IN: put new packs into stock'},
@@ -158,7 +160,7 @@ let cfg=LS('cfg',{url:'',token:'',device:''}),ref=LS('ref',null),queue=LS('q',[]
 if(!cfg.url&&DEFAULT_URL)cfg.url=DEFAULT_URL;
 let mode='',busy=false,refBusy=false,lastErr='',modalOpen=false;
 let sticky={temp:'Chilled',online:'',origin:'',animal:'',dest:'Shop',from:'Market NFM',why:'Damaged',stype:'Shop',ref:''};
-let basket=[],bsel=-1,boxB=null,st=null,doneBox=null,scanLog=[];
+let basket=[],bsel=-1,boxB=null,st=LS('st',null),doneBox=null,scanLog=[];
 const esc=s=>String(s==null?'':s).replace(/[&<>"]/g,c=>'&#'+c.charCodeAt(0)+';');
 const pad=n=>String(n).padStart(2,'0');
 const nowIso=()=>new Date().toISOString();
@@ -374,6 +376,7 @@ function bindSeg(id,fn){const b=$(id);if(!b)return;b.onclick=e=>{const t=e.targe
 function sel(id,opts,val){return'<select id="'+id+'">'+opts.map(o=>'<option'+(o===val?' selected':'')+'>'+esc(o)+'</option>').join('')+'</select>'}
 const TEMP_SEG=()=>'<label class="f">Temperature of the pack'+(mode==='IN'?'':' (new labels know it; old labels do not)')+'</label>'+seg('o_temp',[{v:'Chilled',t:'Chilled'},{v:'Frozen',t:'Frozen'}],sticky.temp);
 function renderOpts(){
+  $('recentwrap').hidden=(mode==='Stocktake');
   const o=$('opts');if(!mode){o.hidden=true;return}o.hidden=false;let h='',after=[];
   const refRow='<label class="f" for="o_ref">Reference (retailer name, invoice or order)</label><input type="text" id="o_ref" value="'+esc(sticky.ref)+'">';
   if(mode==='IN'){
@@ -413,7 +416,7 @@ function setMode(m){
   mode=m;$('note').value='';doneBox=null;
   Array.prototype.forEach.call($('modes').children,b=>b.classList.toggle('on',b.textContent===m));
   basket=[];bsel=-1;
-  $('cur').className='';$('cur').textContent=({IN:'Scan each new pack to put it into stock.',Pick:'Scan the pack you take for each order line.',Sell:'Scan items to build the sale.'})[m]||'Mode: '+m+'. Each scan is saved straight away.';
+  $('cur').className='';$('cur').textContent=({IN:'Scan each new pack to put it into stock.',Pick:'Scan the pack you take for each order line.',Sell:'Scan items to build the sale.',Stocktake:st?'Session in progress: '+st.n+' packs counted. Nothing is sent until you complete it.':'Start a stocktake session, then scan every pack. Nothing is sent until you complete it.'})[m]||'Mode: '+m+'. Each scan is saved straight away.';
   renderOpts();focusScan();
 }
 function setRole(r){
@@ -711,29 +714,44 @@ async function doPick(pr){
   showCard('ok',packHtml(pr,a,'<div class="mut">Order '+esc(hit.order)+' · '+hit.picked+' of '+hit.qty+' picked</div>',[['Order '+hit.order,'green']]));renderPick();
 }
 /* Stocktake */
+const resetCur=t=>{$('cur').className='';$('cur').textContent=t||'Pick a mode, then scan a pack label.'};
+const saveSt=()=>SV('st',st);
 function renderSt(){
   const u=$('stui');if(!u)return;
   if(!st){
-    u.innerHTML='<label class="f">Location being counted</label>'+sel('st_loc',ST_LOCS,sticky.stloc||'Chiller')+TEMP_SEG()+'<button id="st_go" class="go" style="width:100%;margin-top:8px">Start stocktake session</button><div class="mut" style="font-size:.8rem;color:var(--steel);margin-top:6px">Scans in a stocktake are only counted. They do not change stock.</div>';
+    u.innerHTML='<label class="f">Location being counted</label>'+sel('st_loc',ST_LOCS,sticky.stloc||'Chiller')+TEMP_SEG()+'<button id="st_go" class="go" style="width:100%;margin-top:8px">Start stocktake session</button><div class="mut" style="font-size:.8rem;color:var(--steel);margin-top:6px">Scans in a stocktake are only counted. They do not change stock, and nothing is sent until you complete the session.</div>';
     bindSeg('o_temp',v=>{sticky.temp=v});
-    $('st_go').onclick=()=>{sticky.stloc=$('st_loc').value;st={id:'ST-'+ymdhms().slice(0,6)+'-'+ymdhms().slice(7,11)+'-'+slug().slice(0,3).toUpperCase(),loc:sticky.stloc,temp:sticky.temp,counts:{},n:0};renderSt()};return;
+    $('st_go').onclick=()=>{sticky.stloc=$('st_loc').value;st={id:'ST-'+ymdhms().slice(0,6)+'-'+ymdhms().slice(7,11)+'-'+slug().slice(0,3).toUpperCase(),loc:sticky.stloc,temp:sticky.temp,counts:{},n:0,log:[]};saveSt();resetCur('Session started. Scan every pack in the '+st.loc.toLowerCase()+'. Nothing is sent until you complete the session.');renderSt()};return;
   }
   const rows=Object.keys(st.counts).sort().map(k=>'<li><div class="line"><span>'+esc(st.counts[k].name)+'</span><b>'+st.counts[k].n+'</b></div></li>').join('');
-  u.innerHTML='<div class="line"><b>Session '+esc(st.id)+'</b><span class="tag">'+esc(st.loc)+' · '+esc(st.temp)+'</span></div><div class="tot" style="font-weight:600">'+st.n+' packs counted</div><ul class="list">'+(rows||'<li class="sub">Scan every pack in the '+esc(st.loc.toLowerCase())+'.</li>')+'</ul><div class="row"><button id="st_done" class="go half">Complete session</button><button id="st_x" class="ghost half">Abandon</button></div>';
-  $('st_done').onclick=async()=>{
-    if(!await confirmD('Complete stocktake?','<p>'+st.n+' packs counted in the '+esc(st.loc.toLowerCase())+'. Only completed sessions raise Missing flags. Compare it in the Sheet (ECF Stock > Compare stocktake) with the session name <b>'+esc(st.id)+'</b>.</p>','Complete'))return;
-    enqueue([mkEvent('Stocktake','',{reference:st.id,location:st.loc,temperature:st.temp,note:'COMPLETE'})],'Stocktake '+st.id+' complete ('+st.n+' packs)',{noUndo:true});
-    st=null;renderSt();okTone();
+  u.innerHTML='<div class="line"><b>Session '+esc(st.id)+'</b><span class="tag">'+esc(st.loc)+' · '+esc(st.temp)+'</span></div><div class="tot" style="font-weight:600">'+st.n+' packs counted <span style="font-weight:400;color:var(--steel);font-size:.8rem">(not sent yet)</span></div>'+
+    '<div class="row"><button id="st_done" class="go half">Complete and send</button><button id="st_x" class="ghost half">Abandon</button></div>'+
+    '<div class="row" style="margin-top:0"><button id="st_undo" class="ghost sm"'+(st.n?'':' disabled')+'>Remove last scan</button></div>'+
+    '<ul class="list">'+(rows||'<li class="sub">Scan every pack in the '+esc(st.loc.toLowerCase())+'.</li>')+'</ul>';
+  $('st_undo').onclick=()=>{
+    const l=st.log.pop();if(!l)return;
+    const c=st.counts[l.k];if(c&&--c.n<=0)delete st.counts[l.k];st.n--;sessUnmark([l.ev.id]);saveSt();
+    resetCur('Removed the last scan: '+l.name+'.');renderSt();
   };
-  $('st_x').onclick=async()=>{if(await confirmD('Abandon this session?','<p>The packs already scanned stay in the log but the session is not marked complete.</p>','Abandon')){st=null;renderSt()}};
+  $('st_done').onclick=async()=>{
+    if(!await confirmD('Complete stocktake?','<p>'+st.n+' packs counted in the '+esc(st.loc.toLowerCase())+'. They are sent now. Only completed sessions are sent, and they raise the Missing flags. Compare it in the Sheet (ECF Stock > Compare stocktake) and choose session <b>'+esc(st.id)+'</b>.</p>','Complete and send'))return;
+    const marker=mkEvent('Stocktake','',{reference:st.id,location:st.loc,temperature:st.temp,note:'COMPLETE'});
+    enqueue(st.log.map(l=>l.ev).concat([marker]),'Stocktake '+st.id+' sent ('+st.n+' packs)',{noUndo:true});
+    st=null;saveSt();resetCur('Stocktake sent. Start another session when you are ready.');renderSt();okTone();
+  };
+  $('st_x').onclick=async()=>{
+    if(await confirmD('Abandon this session?','<p>The '+st.n+' packs scanned so far are discarded. Nothing is sent to the Sheet.</p>','Abandon')){
+      delete seenS['Stocktake|'+st.id];SV('seen',seenS);st=null;saveSt();resetCur('Session abandoned. Nothing was sent.');renderSt();
+    }
+  };
 }
 function doStScan(pr){
   if(!st)return scanBad(pr.raw,'Start a stocktake session first.');
   if(pr.kind==='box')return scanBad(pr.code,'Scan the packs, not boxes.');
-  const a=analyse(pr,st.temp,'');
-  enqueue([mkEvent('Stocktake',pr.code,{reference:st.id,location:st.loc,temperature:st.temp})],'Stocktake '+labelOf(pr,a),{noUndo:false});
-  const k=a.key||pr.plu;(st.counts[k]=st.counts[k]||{name:labelOf(pr,a),n:0}).n++;st.n++;okTone();
-  showCard('ok',packHtml(pr,a,'<div class="mut">Counted: '+st.n+' in this session</div>',[['Stocktake '+st.id,'green']]));renderSt();
+  const a=analyse(pr,st.temp,''),ev=mkEvent('Stocktake',pr.code,{reference:st.id,location:st.loc,temperature:st.temp}),name=labelOf(pr,a);
+  const k=a.key||pr.plu;st.log.push({ev,k,name});(st.counts[k]=st.counts[k]||{name,n:0}).n++;st.n++;
+  if(pr.kind==='gs1')sessMark(pr.serial,ev.id);saveSt();okTone();
+  showCard('ok',packHtml(pr,a,'<div class="mut">Counted: '+st.n+' in this session (not sent yet)</div>',[['Stocktake '+st.id,'green']]));renderSt();
 }
 /* Fix-ups: missing, found, adjust */
 let fxq='';
@@ -810,7 +828,8 @@ function handle(list,now){
   draw(list);
 }
 $('cam').addEventListener('pointerdown',e=>{
-  if(!running||!polys.length)return;
+  if(!running){if(src==='cam')start();return}
+  if(!polys.length)return;
   const r=o.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;let best=null,bd=1e9;
   polys.forEach(pl=>{const xs=pl.p.map(a=>a[0]),ys=pl.p.map(a=>a[1]),x0=Math.min(...xs)-16,x1=Math.max(...xs)+16,y0=Math.min(...ys)-16,y1=Math.max(...ys)+16;
     if(x>=x0&&x<=x1&&y>=y0&&y<=y1){const d=Math.hypot(x-(x0+x1)/2,y-(y0+y1)/2);if(d<bd){bd=d;best=pl}}});
@@ -820,27 +839,31 @@ async function tick(){
   if(!running)return;const now=performance.now();
   if(now-lastTick>90&&v.readyState>=2){lastTick=now;let l=[];try{l=await detect()}catch(e){}handle(l,now)}
   const left=IDLE-(now-lastActive);
-  if(left<=0)return stop('Camera paused after 60 s idle. Tap Enable camera.');
+  if(left<=0)return stop('Camera paused after 60 s idle · touch to activate');
   msg(left<15000?'Camera sleeps in '+Math.ceil(left/1000)+' s':($('auto').value==='1'?'Auto scan on':'Tap a green box to capture')+' · sleeps after 60 s idle');
   requestAnimationFrame(tick);
 }
+let starting=false;
 async function start(){
+  if(starting||running)return;starting=true;try{await start2()}finally{starting=false}
+}
+async function start2(){
   audio();
   try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}},audio:false})}
   catch(e){return msg('Camera unavailable: '+e.name+'. Open this page over HTTPS.')}
   v.srcObject=stream;await v.play();track=stream.getVideoTracks()[0];
   $('torch').hidden=!(track.getCapabilities&&track.getCapabilities().torch);
   msg('Starting decoder…');try{await initDetector()}catch(e){stop('Could not load a barcode decoder.');return}
-  running=true;lastActive=performance.now();$('power').textContent='Stop camera';lock(true);tick();
+  running=true;lastActive=performance.now();$('cam').classList.remove('off');lock(true);tick();
 }
 function stop(m){
   running=false;lock(false);if(stream)stream.getTracks().forEach(t=>t.stop());v.srcObject=null;torchOn=false;
-  ctx.clearRect(0,0,o.width,o.height);$('power').textContent='Enable camera';msg(m||'Camera is off');
+  ctx.clearRect(0,0,o.width,o.height);$('cam').classList.add('off');$('torch').hidden=true;msg(m||'Camera is off · touch to activate');
 }
-$('power').onclick=()=>running?stop():start();
-$('torch').onclick=()=>{torchOn=!torchOn;track.applyConstraints({advanced:[{torch:torchOn}]})};
+$('torch').onclick=e=>{e.stopPropagation();torchOn=!torchOn;track.applyConstraints({advanced:[{torch:torchOn}]})};
+$('torch').addEventListener('pointerdown',e=>e.stopPropagation());
 document.addEventListener('pointerdown',()=>lastActive=performance.now());
-document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)stop('Camera paused while the app is in the background.')});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)stop('Camera paused while the app was in the background · touch to activate')});
 let wl;
 async function lock(on){try{if(on)wl=await navigator.wakeLock.request('screen');else if(wl){wl.release();wl=null}}catch(e){}}
 
@@ -879,13 +902,15 @@ addEventListener('keydown',e=>{
   else if(!['Shift','CapsLock','Alt','Control','Meta','AltGraph'].includes(e.key))kb='';
 },true);
 function setSrc(s){
-  src=s;localStorage.ecfbsrc=s;$('src').value=s;
+  src=s;localStorage.ecfbsrc=s;$('b_cam').classList.toggle('on',s==='cam');$('b_bt').classList.toggle('on',s==='bt');
   if(s==='bt'&&running)stop();
   document.querySelectorAll('.camonly').forEach(e=>e.hidden=s!=='cam');
   $('btui').hidden=s!=='bt';si.value='';
   if(s==='bt')focusScan();else si.blur();
 }
-$('src').onchange=e=>setSrc(e.target.value);
+$('b_cam').onclick=()=>{if(src!=='cam')setSrc('cam');if(running)stop('Camera is off · touch to activate');else start()};
+$('b_bt').onclick=()=>setSrc('bt');
+$('b_set').onclick=()=>{const p=$('setpanel');p.hidden=!p.hidden;$('b_set').classList.toggle('on',!p.hidden)};
 addEventListener('change',e=>{if(e.target.tagName==='SELECT'&&src==='bt'){e.target.blur();setTimeout(focusScan,50)}});
 $('note').addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();$('note').blur();setTimeout(focusScan,50)}});
 document.addEventListener('pointerdown',e=>{
